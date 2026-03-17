@@ -1,0 +1,58 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW cross-compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-mingw-w64-i686 g++-mingw-w64-i686
+
+      - name: Build all variants
+        run: make -f Makefile.mingw
+
+      - name: Package Pre-Anniversary
+        run: |
+          cd Release
+          zip -r ../cs16-masterservers-pre-anniversary.zip . -x '*.bak'
+
+      - name: Package Anniversary
+        run: |
+          cd Release-anniversary
+          zip -r ../cs16-masterservers-anniversary.zip . -x '*.bak'
+
+      - name: Package GoldClient
+        run: |
+          cd Release-goldclient
+          zip -r ../cs16-masterservers-goldclient.zip . -x '*.bak'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs16-masterservers
+          path: |
+            cs16-masterservers-pre-anniversary.zip
+            cs16-masterservers-anniversary.zip
+            cs16-masterservers-goldclient.zip
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cs16-masterservers-pre-anniversary.zip
+            cs16-masterservers-anniversary.zip
+            cs16-masterservers-goldclient.zip
+          generate_release_notes: true
