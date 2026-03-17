@@ -1,0 +1,55 @@
+NAME = mastersrv
+
+COMPILER = i686-w64-mingw32-g++
+
+SOURCES = src/dllmain.cpp \
+	src/matchmaking_impl.cpp \
+	src/master_query.cpp \
+	src/a2s_query.cpp \
+	src/vdf_parser.cpp \
+	src/server_cache.cpp \
+	src/utils.cpp
+
+INCLUDE = -Isrc
+
+CFLAGS = -std=c++11 -w -m32 -O2 -s -shared \
+	-static-libgcc -static-libstdc++ \
+	-fno-stack-protector -fno-strict-aliasing -fpermissive \
+	-D_WIN32 -DNDEBUG
+
+LDFLAGS = -lws2_32
+
+OUT = Release
+OUT_ANNIV = Release-anniversary
+OUT_GOLD = Release-goldclient
+DLL = $(OUT)/$(NAME).dll
+
+default: all
+
+all: legacy anniversary goldclient
+
+legacy: $(DLL)
+	mkdir -p $(OUT)/platform/servers $(OUT)/platform/config
+	cp originals/pre-anniversary/ServerBrowser.dll $(OUT)/platform/servers/ServerBrowser.dll
+	python3 patch_serverbrowser.py $(OUT)/platform/servers/ServerBrowser.dll
+	cp platform/config/MasterServers.vdf $(OUT)/platform/config/MasterServers.vdf
+
+anniversary: $(DLL)
+	mkdir -p $(OUT_ANNIV)/platform/servers $(OUT_ANNIV)/platform/config
+	cp $(DLL) $(OUT_ANNIV)/$(NAME).dll
+	cp originals/anniversary/ServerBrowser.dll $(OUT_ANNIV)/platform/servers/ServerBrowser.dll
+	python3 patch_serverbrowser.py $(OUT_ANNIV)/platform/servers/ServerBrowser.dll
+	cp platform/config/MasterServers.vdf $(OUT_ANNIV)/platform/config/MasterServers.vdf
+
+goldclient: $(DLL)
+	mkdir -p $(OUT_GOLD)
+	cp originals/goldclient/steam_api.dll $(OUT_GOLD)/steam_api.dll
+	python3 patch_gms_urls.py $(OUT_GOLD)/steam_api.dll
+	cp originals/goldclient/hosts_append.txt $(OUT_GOLD)/hosts_append.txt
+
+$(DLL): $(SOURCES)
+	mkdir -p $(OUT)
+	$(COMPILER) $(CFLAGS) $(INCLUDE) -o $(DLL) $(SOURCES) $(LDFLAGS)
+
+clean:
+	rm -rf $(OUT) $(OUT_ANNIV) $(OUT_GOLD)

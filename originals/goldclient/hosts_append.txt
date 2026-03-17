@@ -1,0 +1,4 @@
+# Block CSPro/GoldClient auto-updater from overwriting patched files
+# Add these lines to C:\Windows\System32\drivers\etc\hosts
+127.0.0.1 depot.cs-play.net
+127.0.0.1 renewal.cs-play.net

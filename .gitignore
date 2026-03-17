@@ -1,0 +1,10 @@
+Release/
+Release-anniversary/
+Release-goldclient/
+*.bak
+*.log
+*.o
+*.obj
+cspro-browser.mjs
+Half-Life/
+.github/

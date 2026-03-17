@@ -1,0 +1,10 @@
+"MasterServers"
+{
+	"hl1"
+	{
+		"0"
+		{
+			"addr"		"ms.cs16.net:27010"
+		}
+	}
+}
