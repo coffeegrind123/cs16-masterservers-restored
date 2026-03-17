@@ -1,12 +1,12 @@
-name: Build
+name: Build and Release
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -23,6 +23,13 @@ jobs:
       - name: Build all variants
         run: make -f Makefile.mingw
 
+      - name: Get version info
+        id: version
+        run: |
+          echo "short_hash=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "tag=v$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Package Pre-Anniversary
         run: |
           cd Release
@@ -38,21 +45,30 @@ jobs:
           cd Release-goldclient
           zip -r ../cs16-masterservers-goldclient.zip . -x '*.bak'
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: cs16-masterservers
-          path: |
-            cs16-masterservers-pre-anniversary.zip
-            cs16-masterservers-anniversary.zip
-            cs16-masterservers-goldclient.zip
+      - name: Create tag
+        run: |
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: ncipollo/release-action@v1
         with:
-          files: |
+          tag: ${{ steps.version.outputs.tag }}
+          name: "CS 1.6 Master Servers Restored ${{ steps.version.outputs.tag }}"
+          artifacts: |
             cs16-masterservers-pre-anniversary.zip
             cs16-masterservers-anniversary.zip
             cs16-masterservers-goldclient.zip
-          generate_release_notes: true
+          body: |
+            ## Downloads
+
+            | Build | Description |
+            |-------|-------------|
+            | **Pre-Anniversary** | Steam Legacy build (pre-25th anniversary update) |
+            | **Anniversary** | 25th Anniversary Update build |
+            | **GoldClient** | CSPro/GoldClient (non-Steam) |
+
+            See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for installation instructions.
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}
