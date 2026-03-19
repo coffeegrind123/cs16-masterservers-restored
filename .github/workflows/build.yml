@@ -20,6 +20,20 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-mingw-w64-i686 g++-mingw-w64-i686
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install DepotDownloader
+        run: dotnet tool install -g DepotDownloader
+
+      - name: Fetch ServerBrowser.dll from Steam
+        env:
+          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
+          STEAM_PASSWORD: ${{ secrets.STEAM_PASSWORD }}
+        run: bash scripts/fetch_originals.sh
+
       - name: Build all variants
         run: make -f Makefile.mingw
 
