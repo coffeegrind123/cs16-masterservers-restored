@@ -154,6 +154,7 @@ private:
 	static DWORD WINAPI QueryThread(LPVOID param);
 
 	gameserveritem_t m_servers[MAX_GAME_SERVERS];
+	bool m_dispatched[MAX_GAME_SERVERS];
 	volatile int m_serverCount;
 	volatile bool m_refreshing;
 	ISteamMatchmakingServerListResponse *m_pResponse;

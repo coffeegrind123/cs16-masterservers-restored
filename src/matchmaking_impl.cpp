@@ -57,6 +57,7 @@ CRealMasterMatchmaking::CRealMasterMatchmaking()
 	m_dispatching = false;
 	m_pRealSteam = NULL;
 	memset(m_servers, 0, sizeof(m_servers));
+	memset(m_dispatched, 0, sizeof(m_dispatched));
 }
 
 CRealMasterMatchmaking::~CRealMasterMatchmaking()
@@ -143,63 +144,125 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
 	if (data->self->m_cancelRequested) { data->self->m_queryDone = true; delete data; return 0; }
 
-	int batch_size = 16;
-	for (int base = 0; base < total && !data->self->m_cancelRequested; base += batch_size)
+	for (int i = 0; i < total; i++)
+	{
+		gameserveritem_t *gs = &data->servers[i];
+		memset(gs, 0, sizeof(*gs));
+		gs->m_NetAdr.Init(ntohl(master_result.servers[i].ip),
+			ntohs(master_result.servers[i].port),
+			ntohs(master_result.servers[i].port));
+		gs->m_bHadSuccessfulResponse = false;
+	}
+	*data->serverCount = total;
+
+	RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
+
+	int send_batch = 64;
+	SOCKET socks[MAX_GAME_SERVERS];
+	DWORD starts[MAX_GAME_SERVERS];
+
+	for (int base = 0; base < total && !data->self->m_cancelRequested; base += send_batch)
 	{
 		int batch = total - base;
-		if (batch > batch_size) batch = batch_size;
-
-		uint32_t ips[16];
-		uint16_t ports[16];
-		a2s_server_info_t infos[16];
-
-		for (int i = 0; i < batch; i++)
-		{
-			ips[i] = master_result.servers[base + i].ip;
-			ports[i] = master_result.servers[base + i].port;
-		}
-
-		int valid = a2s_query_batch(ips, ports, batch, infos, 2000);
+		if (batch > send_batch) batch = send_batch;
 
 		for (int i = 0; i < batch; i++)
 		{
 			int idx = base + i;
-			gameserveritem_t *gs = &data->servers[idx];
-			memset(gs, 0, sizeof(*gs));
+			socks[idx] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			if (socks[idx] == INVALID_SOCKET) continue;
 
-			gs->m_NetAdr.Init(ntohl(ips[i]), ntohs(ports[i]), ntohs(ports[i]));
+			struct sockaddr_in dest;
+			memset(&dest, 0, sizeof(dest));
+			dest.sin_family = AF_INET;
+			dest.sin_addr.s_addr = master_result.servers[idx].ip;
+			dest.sin_port = master_result.servers[idx].port;
 
-			if (infos[i].valid)
-			{
-				gs->m_nPing = infos[i].ping_ms;
-				gs->m_bHadSuccessfulResponse = true;
-				gs->SetName(infos[i].name);
-				strncpy(gs->m_szMap, infos[i].map, sizeof(gs->m_szMap) - 1);
-				strncpy(gs->m_szGameDir, infos[i].gamedir, sizeof(gs->m_szGameDir) - 1);
-				strncpy(gs->m_szGameDescription, infos[i].gamedesc, sizeof(gs->m_szGameDescription) - 1);
-				gs->m_nAppID = infos[i].appid;
-				gs->m_nPlayers = infos[i].players;
-				gs->m_nMaxPlayers = infos[i].max_players;
-				gs->m_nBotPlayers = infos[i].bots;
-				gs->m_bPassword = infos[i].password != 0;
-				gs->m_bSecure = infos[i].secure != 0;
-			}
-			else
-			{
-				gs->m_bHadSuccessfulResponse = false;
-			}
-
-			*data->serverCount = idx + 1;
+			starts[idx] = GetTickCount();
+			sendto(socks[idx], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+				(struct sockaddr *)&dest, sizeof(dest));
 		}
-
-		RealMasterLog("A2S batch %d-%d: %d/%d responded", base, base+batch-1, valid, batch);
 	}
 
+	DWORD deadline = GetTickCount() + 3000;
 	int responded = 0;
-	for (int i = 0; i < *data->serverCount; i++)
-		if (data->servers[i].m_bHadSuccessfulResponse) responded++;
+	int closed = 0;
 
-	RealMasterLog("QueryThread finished: %d total, %d responded", *data->serverCount, responded);
+	while (closed < total && !data->self->m_cancelRequested)
+	{
+		DWORD now = GetTickCount();
+		if (now >= deadline) break;
+
+		fd_set readfds;
+		FD_ZERO(&readfds);
+		SOCKET max_sock = 0;
+		int active = 0;
+
+		for (int i = 0; i < total; i++)
+		{
+			if (socks[i] == INVALID_SOCKET) continue;
+			FD_SET(socks[i], &readfds);
+			if (socks[i] > max_sock) max_sock = socks[i];
+			active++;
+		}
+		if (active == 0) break;
+
+		struct timeval tv;
+		DWORD remain = deadline - now;
+		if (remain > 100) remain = 100;
+		tv.tv_sec = 0;
+		tv.tv_usec = remain * 1000;
+
+		int sel = select((int)max_sock + 1, &readfds, NULL, NULL, &tv);
+		if (sel < 0) break;
+
+		for (int i = 0; i < total && sel > 0; i++)
+		{
+			if (socks[i] == INVALID_SOCKET) continue;
+			if (!FD_ISSET(socks[i], &readfds)) continue;
+
+			uint8_t buf[2048];
+			struct sockaddr_in from;
+			int fromlen = sizeof(from);
+			int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
+				(struct sockaddr *)&from, &fromlen);
+
+			DWORD elapsed = GetTickCount() - starts[i];
+			gameserveritem_t *gs = &data->servers[i];
+
+			a2s_server_info_t info;
+			memset(&info, 0, sizeof(info));
+			if (recv_len > 0 && parse_a2s_response(buf, recv_len, &info))
+			{
+				gs->m_nPing = (int)elapsed;
+				gs->m_bHadSuccessfulResponse = true;
+				gs->SetName(info.name);
+				strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
+				strncpy(gs->m_szGameDir, info.gamedir, sizeof(gs->m_szGameDir) - 1);
+				strncpy(gs->m_szGameDescription, info.gamedesc, sizeof(gs->m_szGameDescription) - 1);
+				gs->m_nAppID = info.appid;
+				gs->m_nPlayers = info.players;
+				gs->m_nMaxPlayers = info.max_players;
+				gs->m_nBotPlayers = info.bots;
+				gs->m_bPassword = info.password != 0;
+				gs->m_bSecure = info.secure != 0;
+				responded++;
+			}
+
+			closesocket(socks[i]);
+			socks[i] = INVALID_SOCKET;
+			closed++;
+			sel--;
+		}
+	}
+
+	for (int i = 0; i < total; i++)
+	{
+		if (socks[i] != INVALID_SOCKET)
+			closesocket(socks[i]);
+	}
+
+	RealMasterLog("QueryThread finished: %d total, %d responded", total, responded);
 	data->self->m_queryDone = true;
 	delete data;
 	return 0;
@@ -228,6 +291,7 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
 	m_queryDone = false;
 	m_cancelRequested = false;
 	m_lastDispatchedIdx = 0;
+	memset(m_dispatched, 0, sizeof(m_dispatched));
 	m_pResponse = pResponse;
 	m_requestCounter++;
 
@@ -346,28 +410,25 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 	HServerListRequest hReq = (HServerListRequest)(uintptr_t)m_requestCounter;
 	int current = m_serverCount;
 
-	if (m_lastDispatchedIdx < current && m_lastDispatchedIdx == 0)
-		RealMasterLog("DispatchCallbacks: dispatching %d-%d", m_lastDispatchedIdx, current - 1);
-
 	int dispatched = 0;
 	int maxPerFrame = 20;
-	while (m_lastDispatchedIdx < current && dispatched < maxPerFrame)
+	for (int i = 0; i < current && dispatched < maxPerFrame; i++)
 	{
-		int idx = m_lastDispatchedIdx;
-		if (m_servers[idx].m_bHadSuccessfulResponse)
+		if (m_dispatched[i]) continue;
+		if (m_servers[i].m_bHadSuccessfulResponse)
 		{
-			m_pResponse->ServerResponded(hReq, idx);
+			m_pResponse->ServerResponded(hReq, i);
+			m_dispatched[i] = true;
+			m_lastDispatchedIdx++;
 			dispatched++;
 		}
-		else
+		else if (m_queryDone)
 		{
-			m_pResponse->ServerFailedToRespond(hReq, idx);
+			m_pResponse->ServerFailedToRespond(hReq, i);
+			m_dispatched[i] = true;
+			m_lastDispatchedIdx++;
 		}
-		m_lastDispatchedIdx++;
 	}
-
-	if (dispatched > 0)
-		RealMasterLog("Dispatched %d ServerResponded (dispatched %d/%d)", dispatched, m_lastDispatchedIdx, current);
 
 	if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
 	{
