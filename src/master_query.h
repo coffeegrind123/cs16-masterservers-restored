@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 #define MAX_QUERY_SERVERS 16384
-#define QUERY_TIMEOUT_MS 5000
+#define QUERY_TIMEOUT_MS 3000
 #define QUERY_MAX_RETRIES 30
 
 struct query_server_t
