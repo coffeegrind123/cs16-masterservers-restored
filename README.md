@@ -37,34 +37,18 @@ A hosts file is included to block the CSPro auto-updater from overwriting the pa
 
 ## Installation
 
-### Steam Legacy (Pre-Anniversary)
+### Steam Legacy & Anniversary
 
-Download the `pre-anniversary` release and copy into your Half-Life folder:
-
-```
-Half-Life/
-  mastersrv.dll                         <- new
-  platform/
-    config/
-      MasterServers.vdf                 <- new
-    servers/
-      ServerBrowser.dll                 <- replace
-```
-
-Launch with `-insecure` flag.
-
-### Anniversary Update
-
-Download the `anniversary` release and copy into your Half-Life folder:
+Download the `pre-anniversary` or `anniversary` release and copy into your Half-Life folder:
 
 ```
 Half-Life/
-  mastersrv.dll                         <- new
-  platform/
-    config/
-      MasterServers.vdf                 <- new
-    servers/
-      ServerBrowser.dll                 <- replace
+├── mastersrv.dll                      <- new
+└── platform/
+    ├── config/
+    │   └── MasterServers.vdf          <- new
+    └── servers/
+        └── ServerBrowser.dll          <- replace
 ```
 
 Launch with `-insecure` flag.
