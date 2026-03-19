@@ -19,6 +19,17 @@ static CRITICAL_SECTION g_logCS;
 static bool g_logCSInit = false;
 
 static char g_selfDir[512] = {0};
+static char g_pendingSetmaster[256] = {0};
+
+static void StripQuotes(char *s)
+{
+	int len = (int)strlen(s);
+	if (len >= 2 && s[0] == '"' && s[len-1] == '"')
+	{
+		memmove(s, s + 1, len - 2);
+		s[len - 2] = '\0';
+	}
+}
 
 void RealMasterLog(const char *fmt, ...)
 {
@@ -97,6 +108,7 @@ static void Cmd_SetMaster(void)
 		}
 		strncat(full_addr, arg, sizeof(full_addr) - strlen(full_addr) - 1);
 	}
+	StripQuotes(full_addr);
 	if (!strchr(full_addr, ':'))
 		strncat(full_addr, ":27010", sizeof(full_addr) - strlen(full_addr) - 1);
 
@@ -370,6 +382,40 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 
 	InitEngineHook();
 
+	static bool g_pendingSetmasterDone = false;
+	if (g_engineHooked && !g_pendingSetmasterDone && g_pendingSetmaster[0])
+	{
+		g_pendingSetmasterDone = true;
+		RealMasterLog("Executing deferred +setmaster %s", g_pendingSetmaster);
+
+		char full_addr[256];
+		if (!strchr(g_pendingSetmaster, ':'))
+			snprintf(full_addr, sizeof(full_addr), "%s:27010", g_pendingSetmaster);
+		else
+		{
+			strncpy(full_addr, g_pendingSetmaster, sizeof(full_addr) - 1);
+			full_addr[sizeof(full_addr) - 1] = '\0';
+		}
+
+		if (g_pConPrintf)
+			g_pConPrintf("Verifying master server %s...\n", full_addr);
+
+		if (master_validate_server(full_addr))
+		{
+			char vdf_path[512];
+			snprintf(vdf_path, sizeof(vdf_path), "%s\\platform\\config\\MasterServers.vdf", g_selfDir);
+			vdf_write_master_server(vdf_path, full_addr);
+			g_MasterListLoaded = false;
+			if (g_pConPrintf)
+				g_pConPrintf("Master server set to %s\n", full_addr);
+		}
+		else
+		{
+			if (g_pConPrintf)
+				g_pConPrintf("Error: Master server %s is not responding.\n", full_addr);
+		}
+	}
+
 	CRealMasterMatchmaking *p = (CRealMasterMatchmaking *)GetRealMasterMatchmaking();
 	p->DispatchCallbacks();
 
@@ -384,7 +430,15 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 		return NULL; \
 	}
 
-FORWARD_FUNC(SteamAPI_Init)
+extern "C" __declspec(dllexport) void * __cdecl SteamAPI_Init()
+{
+	LOAD_REAL_FUNC(SteamAPI_Init)
+	void *ret = NULL;
+	if (pfn_SteamAPI_Init) ret = pfn_SteamAPI_Init();
+	if (g_pendingSetmaster[0])
+		InitEngineHook();
+	return ret;
+}
 FORWARD_FUNC(SteamAPI_Shutdown)
 FORWARD_FUNC(SteamFriends)
 FORWARD_FUNC(SteamApps)
@@ -393,6 +447,8 @@ FORWARD_FUNC(SteamMatchmaking)
 extern "C" __declspec(dllexport) void __cdecl SteamAPI_RegisterCallback(void *pCallback, int iCallback)
 {
 	EnsureRealSteamApi();
+	if (g_pendingSetmaster[0] && !g_engineHooked)
+		InitEngineHook();
 	typedef void (__cdecl *Func_t)(void *, int);
 	static Func_t pfn = NULL;
 	if (!pfn && g_hRealSteamApi)
@@ -457,6 +513,88 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 		if (slash) *slash = '\0';
 
 		RealMasterLog("=== realmastr.dll loaded from %s ===", g_selfDir);
+
+		const char *cmdLine = GetCommandLineA();
+		const char *sm = strstr(cmdLine, "+setmaster");
+		if (sm)
+		{
+			sm += 10;
+			while (*sm == ' ') sm++;
+			int j = 0;
+			while (*sm && *sm != ' ' && *sm != '+' && *sm != '-' && j < 255)
+				g_pendingSetmaster[j++] = *sm++;
+			g_pendingSetmaster[j] = '\0';
+			StripQuotes(g_pendingSetmaster);
+			if (g_pendingSetmaster[0])
+				RealMasterLog("Pending +setmaster: %s", g_pendingSetmaster);
+		}
+
+		if (!g_pendingSetmaster[0])
+		{
+			char cfgPath[512];
+			const char *cfgNames[] = { "cstrike\\config.cfg", "cstrike\\autoexec.cfg",
+				"cstrike\\userconfig.cfg", "valve\\config.cfg", "valve\\autoexec.cfg", NULL };
+			for (int c = 0; cfgNames[c] && !g_pendingSetmaster[0]; c++)
+			{
+				snprintf(cfgPath, sizeof(cfgPath), "%s\\%s", g_selfDir, cfgNames[c]);
+				FILE *cfg = fopen(cfgPath, "r");
+				if (!cfg) { RealMasterLog("Config scan: %s not found", cfgPath); continue; }
+				char line[512];
+				while (fgets(line, sizeof(line), cfg))
+				{
+					char *p = line;
+					while (*p == ' ' || *p == '\t') p++;
+					if (strnicmp(p, "setmaster", 9) == 0 && (p[9] == ' ' || p[9] == '\t'))
+					{
+						p += 9;
+						while (*p == ' ' || *p == '\t') p++;
+						int j = 0;
+						while (*p && *p != '\r' && *p != '\n' && *p != ';' && j < 255)
+							g_pendingSetmaster[j++] = *p++;
+						while (j > 0 && g_pendingSetmaster[j-1] == ' ') j--;
+						g_pendingSetmaster[j] = '\0';
+						StripQuotes(g_pendingSetmaster);
+						if (g_pendingSetmaster[0])
+							RealMasterLog("Pending setmaster from %s: %s", cfgNames[c], g_pendingSetmaster);
+					}
+				}
+				fclose(cfg);
+			}
+		}
+
+		if (g_pendingSetmaster[0])
+		{
+			HMODULE hHw = GetModuleHandleA("hw.dll");
+			RealMasterLog("Early patch: hw.dll=%p, pending=%s", hHw, g_pendingSetmaster);
+			if (hHw)
+			{
+				IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)hHw;
+				IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((uint8_t *)hHw + dos->e_lfanew);
+				uint8_t *base = (uint8_t *)hHw;
+				size_t imageSize = nt->OptionalHeader.SizeOfImage;
+
+				const char *smNeedle = "setmaster";
+				uint8_t *smStr = FindPattern(base, imageSize, (const uint8_t *)smNeedle, 10);
+				if (smStr)
+				{
+					uint8_t smPush[5] = { 0x68 };
+					memcpy(smPush + 1, &smStr, 4);
+					uint8_t *smPushRef = FindPattern(base, imageSize, smPush, 5);
+					if (smPushRef && smPushRef[-5] == 0x68)
+					{
+						uint8_t *handler = *(uint8_t **)(smPushRef - 4);
+						if (handler >= base && handler < base + imageSize)
+						{
+							DWORD oldProt;
+							VirtualProtect(handler, 1, PAGE_EXECUTE_READWRITE, &oldProt);
+							handler[0] = 0xC3;
+							VirtualProtect(handler, 1, oldProt, &oldProt);
+							RealMasterLog("Patched original setmaster handler at %p to RET", handler);
+						}
+					}
+				}
+			}
+		}
 	}
 	else if (fdwReason == DLL_PROCESS_DETACH)
 	{

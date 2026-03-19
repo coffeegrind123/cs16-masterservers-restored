@@ -85,9 +85,24 @@ Edit `platform/config/MasterServers.vdf` to add custom master servers:
 }
 ```
 
-Add as many entries as needed. The server browser queries all configured masters and merges results.
+Masters are tried top-down — the first one that responds is used. If none respond, the server cache is used as fallback.
 
 If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
+
+### setmaster Console Command
+
+The `setmaster` console command is enhanced to work without a running server:
+
+```
+setmaster <ip[:port]>
+```
+
+- Validates the master server is reachable before saving (2s timeout)
+- Writes to `MasterServers.vdf` and reloads the config immediately
+- Default port is 27010 if not specified
+- Also works from launch options (`+setmaster ip:port`) or `config.cfg`
+
+The command hooks into the engine's console system at runtime via pattern scanning — no engine files are modified.
 
 ## Building from Source
 
