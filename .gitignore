@@ -7,4 +7,6 @@ Release-goldclient/
 *.obj
 cspro-browser.mjs
 Half-Life/
-.github/
+
+originals/pre-anniversary/*.dll
+originals/anniversary/*.dll
