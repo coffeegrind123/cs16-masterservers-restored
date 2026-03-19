@@ -25,6 +25,7 @@ static SOCKET *g_pServerSocket = NULL;
 static char *g_pMapName = NULL;
 static int *g_pMaxPlayers = NULL;
 static uint8_t *g_pClientArray = NULL;
+static int g_clientStride = 0;
 static char *g_pGameDir = NULL;
 static DWORD g_lastHeartbeat = 0;
 static bool g_heartbeatActive = false;
@@ -120,7 +121,12 @@ static void GatherHeartbeatInfo(heartbeat_info_t *info)
 		strncpy(info->map, g_pMapName, sizeof(info->map) - 1);
 
 	if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
+	{
 		strncpy(info->gamedir, g_pGameDir, sizeof(info->gamedir) - 1);
+		char *lastSlash = strrchr(info->gamedir, '\\');
+		if (lastSlash && lastSlash[1])
+			memmove(info->gamedir, lastSlash + 1, strlen(lastSlash + 1) + 1);
+	}
 	else
 		strncpy(info->gamedir, "cstrike", sizeof(info->gamedir) - 1);
 
@@ -153,17 +159,17 @@ static void GatherHeartbeatInfo(heartbeat_info_t *info)
 
 	info->is_dedicated = (GetModuleHandleA("swds.dll") != NULL) ? 1 : 0;
 
-	if (g_pClientArray && g_pMaxPlayers && !IsBadReadPtr(g_pMaxPlayers, 4))
+	if (g_pClientArray && g_pMaxPlayers && !IsBadReadPtr(g_pMaxPlayers, 4) && g_clientStride > 0)
 	{
 		int max = *g_pMaxPlayers;
-		if (max > 32) max = 32;
+		if (max > 64) max = 64;
 		for (int i = 0; i < max; i++)
 		{
-			uint8_t *client = g_pClientArray + (i * 0x5018);
-			if (IsBadReadPtr(client, 0x230)) break;
+			uint8_t *client = g_pClientArray + (i * g_clientStride);
+			if (IsBadReadPtr(client, g_clientStride)) break;
 			if (*(int *)client == 0) continue;
 			info->players++;
-			if (*(uint8_t *)(client + 0x222) & 0x20)
+			if (!IsBadReadPtr(client + 0x222, 1) && (*(uint8_t *)(client + 0x222) & 0x20))
 				info->bots++;
 		}
 	}
@@ -327,6 +333,12 @@ static void InitEngineHook()
 			RealMasterLog("Engine hook: server state at %p", g_pServerState);
 			break;
 		}
+		if (handler[i] == 0x83 && handler[i + 1] == 0x3D)
+		{
+			g_pServerState = *(void **)(handler + i + 2);
+			RealMasterLog("Engine hook: server state at %p (via CMP)", g_pServerState);
+			break;
+		}
 	}
 	uint8_t *scan = handler;
 	uint8_t *scanEnd = handler + 64;
@@ -447,6 +459,16 @@ static void InitEngineHook()
 						break;
 					}
 				}
+				if (p[0] == 0xFF && p[1] == 0x35)
+				{
+					int *candidate = *(int **)(p + 2);
+					if (!IsBadReadPtr(candidate, 4))
+					{
+						g_pMaxPlayers = candidate;
+						RealMasterLog("Engine hook: maxplayers at %p (value=%d, via PUSH)", g_pMaxPlayers, *g_pMaxPlayers);
+						break;
+					}
+				}
 			}
 		}
 	}
@@ -460,6 +482,30 @@ static void InitEngineHook()
 			RealMasterLog("Engine hook: client array at %p", g_pClientArray);
 		}
 	}
+
+	if (playersStr)
+	{
+		uint8_t playersPush2[5] = { 0x68 };
+		memcpy(playersPush2 + 1, &playersStr, 4);
+		uint8_t *ref = FindPattern(base, imageSize, playersPush2, 5);
+		if (ref)
+		{
+			for (uint8_t *p = ref; p < ref + 1024; p++)
+			{
+				if (p[0] == 0x81 && (p[1] & 0xF8) == 0xC0)
+				{
+					int val = *(int *)(p + 2);
+					if (val > 0x1000 && val < 0x10000)
+					{
+						g_clientStride = val;
+						RealMasterLog("Engine hook: client stride = 0x%x (%d)", g_clientStride, g_clientStride);
+						break;
+					}
+				}
+			}
+		}
+	}
+	if (g_clientStride == 0) g_clientStride = 0x5018;
 
 	const char *gdNeedle = "*gamedir";
 	uint8_t *gdStr = FindPattern(base, imageSize, (const uint8_t *)gdNeedle, strlen(gdNeedle) + 1);
@@ -503,7 +549,7 @@ static void InitEngineHook()
 			}
 			for (uint8_t *p = fn; p < netRef; p++)
 			{
-				if (p[0] == 0x8B && p[1] == 0x34 && (p[2] == 0xBD || p[2] == 0x85))
+				if (p[0] == 0x8B && p[1] == 0x34 && (p[2] & 0xC7) == 0x85)
 				{
 					SOCKET *sockArray = *(SOCKET **)(p + 3);
 					if (!IsBadReadPtr(sockArray, 8))
