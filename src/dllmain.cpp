@@ -10,20 +10,24 @@ static HMODULE g_hRealSteamApi = NULL;
 static bool g_bRealSteamResolved = false;
 static bool g_bWsaInit = false;
 static FILE *g_logFile = NULL;
+static CRITICAL_SECTION g_logCS;
+static bool g_logCSInit = false;
 
 static char g_selfDir[512] = {0};
 
 void RealMasterLog(const char *fmt, ...)
 {
+	if (!g_logCSInit) return;
+	EnterCriticalSection(&g_logCS);
 	if (!g_logFile)
 	{
-		char logpath[512];
+		char logpath[MAX_PATH];
 		if (g_selfDir[0])
 			snprintf(logpath, sizeof(logpath), "%s\\mastersrv_debug.log", g_selfDir);
 		else
 			strcpy(logpath, "mastersrv_debug.log");
 		g_logFile = fopen(logpath, "w");
-		if (!g_logFile) return;
+		if (!g_logFile) { LeaveCriticalSection(&g_logCS); return; }
 	}
 	va_list ap;
 	va_start(ap, fmt);
@@ -31,6 +35,7 @@ void RealMasterLog(const char *fmt, ...)
 	va_end(ap);
 	fprintf(g_logFile, "\n");
 	fflush(g_logFile);
+	LeaveCriticalSection(&g_logCS);
 }
 
 typedef void *(*GenericSteamFunc_t)();
@@ -185,6 +190,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 	{
 		g_hSelf = hinstDLL;
 		DisableThreadLibraryCalls(hinstDLL);
+		InitializeCriticalSection(&g_logCS);
+		g_logCSInit = true;
 
 		GetModuleFileNameA(hinstDLL, g_selfDir, sizeof(g_selfDir));
 		char *slash = strrchr(g_selfDir, '\\');
@@ -192,6 +199,11 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 		if (slash) *slash = '\0';
 
 		RealMasterLog("=== realmastr.dll loaded from %s ===", g_selfDir);
+	}
+	else if (fdwReason == DLL_PROCESS_DETACH)
+	{
+		if (g_logFile) { fclose(g_logFile); g_logFile = NULL; }
+		if (g_logCSInit) { DeleteCriticalSection(&g_logCS); g_logCSInit = false; }
 	}
 	return TRUE;
 }
