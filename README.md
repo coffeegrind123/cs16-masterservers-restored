@@ -123,6 +123,8 @@ Heartbeats are sent every 30 seconds using the engine's own server socket (port 
 | `secure` | `-insecure` command line detection |
 | `type` | `l` (listen) or `d` (dedicated) via module check |
 
+Port 27015 (UDP) must be open in your router and firewall for the master server to verify your server and for players to connect.
+
 The engine's built-in `heartbeat` console command can be used to send an extra heartbeat on demand. When the server is stopped, heartbeats cease automatically.
 
 You can also put `setmaster <ip:port>` in `config.cfg` or use `+setmaster <ip:port>` in launch options for automatic registration on every start.
