@@ -2,8 +2,8 @@
 
 Restores custom master server support for Counter-Strike 1.6, allowing server browsers to query independent master servers instead of Valve's deprecated infrastructure.
 
-Supports all three CS 1.6 client variants:
-- **Steam Legacy** (pre-anniversary update)
+Works with all three CS 1.6 client variants:
+- **Steam Legacy** (pre-25th anniversary update)
 - **Anniversary Update** (25th anniversary build)
 - **GoldClient/CSPro** (non-Steam client)
 
@@ -18,22 +18,17 @@ Supports all three CS 1.6 client variants:
 ### GoldClient/CSPro
 ![GoldClient](screenshots/goldclient.png)
 
-## How It Works
+## What is this?
 
-### Steam Legacy & Anniversary
+A drop-in proxy DLL (`mastersrv.dll`) that intercepts Steam's matchmaking API to query custom HL1 master servers. The original `ServerBrowser.dll` is patched to load `mastersrv.dll` instead of `steam_api.dll` for matchmaking — all other Steam API calls pass through untouched.
 
-A proxy DLL (`mastersrv.dll`) intercepts the Steam matchmaking API to query custom master servers via the standard Valve HL1 UDP protocol. The original `ServerBrowser.dll` is patched to load `mastersrv.dll` instead of `steam_api.dll` for matchmaking functions only - all other Steam API calls (favorites, LAN, friends, history) pass through to the real `steam_api.dll`.
-
-- Master server list loaded from `platform/config/MasterServers.vdf`
-- Servers queried via A2S_INFO for live details (name, map, players, ping)
-- Results delivered incrementally to the server browser UI
+Features:
+- Incremental server list population (servers appear as they respond, like the original Steam behavior)
+- Sliding window A2S queries (128 concurrent, handles 3000+ server lists)
+- Enhanced `setmaster` console command with validation and VDF config writing
+- Heartbeat support for listen servers (register your server with any master)
+- Engine integration via runtime pattern scanning — no engine files modified
 - One universal `mastersrv.dll` works with both pre-anniversary and anniversary builds
-
-### GoldClient/CSPro
-
-The CSPro `steam_api.dll` has hardcoded GMS (Game Master Server) protocol URLs that are XOR-obfuscated in the binary. The patcher replaces these URLs with custom master server addresses at specific instruction offsets.
-
-A hosts file is included to block the CSPro auto-updater from overwriting the patched DLL.
 
 ## Installation
 
@@ -66,7 +61,7 @@ The hosts file blocks `depot.cs-play.net` and `renewal.cs-play.net` to prevent t
 
 ### MasterServers.vdf
 
-Edit `platform/config/MasterServers.vdf` to add custom master servers:
+Edit `platform/config/MasterServers.vdf` to configure master servers:
 
 ```
 "MasterServers"
@@ -85,46 +80,50 @@ Edit `platform/config/MasterServers.vdf` to add custom master servers:
 }
 ```
 
-Masters are tried top-down — the first one that responds is used. If none respond, the server cache is used as fallback.
-
-If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
+Masters are tried top-down — the first one that responds is used. If none respond, the local server cache is used as fallback. If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
 
 ### setmaster Console Command
-
-The `setmaster` console command is enhanced to work without a running server:
 
 ```
 setmaster <ip[:port]>
 ```
 
-- Validates the master server is reachable before saving (2s timeout)
-- Writes to `MasterServers.vdf` and reloads the config immediately
-- Default port is 27010 if not specified
-- Also works from launch options (`+setmaster ip:port`) or `config.cfg`
-- If a listen server is running, automatically registers it with the master via heartbeat
+| Feature | Details |
+|---------|---------|
+| Validation | Verifies master is reachable before saving (2s timeout) |
+| Persistence | Writes to `MasterServers.vdf` and reloads immediately |
+| Default port | 27010 if not specified |
+| Startup support | Works from launch options (`+setmaster ip:port`) and `config.cfg` |
+| Heartbeat | If a listen server is running, automatically registers it with the master |
 
-The command hooks into the engine's console system at runtime via pattern scanning — no engine files are modified.
+The command hooks into the engine's console system at runtime via pattern scanning — no engine files are modified. The engine's built-in `setmaster` (which only works for dedicated servers) is replaced transparently.
 
-### Heartbeat (Listen Server Registration)
+## Hosting a Listen Server
 
-When `setmaster` is used while hosting a listen server, mastersrv.dll automatically registers the server with the master using the HL1 heartbeat protocol:
-
-1. Sends a challenge request to the master server
-2. Receives and echoes the challenge value
-3. Sends a registration packet with server info (hostname, map, players, maxplayers, etc.)
-4. Repeats every 30 seconds while the server is running
-
-Server info (hostname, map, maxplayers, password, LAN mode) is read directly from the engine's memory via pattern-scanned function pointers and structure offsets. Heartbeats are sent from the game server's UDP port (27015) so the master lists the correct address. When the server is stopped, heartbeats cease automatically.
-
-#### Hosting a Listen Server
+mastersrv.dll includes full heartbeat support for listen servers using the [Valve HL1 master server protocol](https://developer.valvesoftware.com/wiki/Master_Server_Query_Protocol):
 
 1. Install the mod as described above
 2. Start a game (New Game or `map <mapname>` in console)
-3. Set `sv_lan 0` if you want the server visible on the internet
+3. Set `sv_lan 0` to make the server visible on the internet
 4. Run `setmaster <master_ip:port>` to register with a master server
 5. Your server will appear in other players' server browsers
 
-You can also put `setmaster <master_ip:port>` in your `config.cfg` or use `+setmaster <master_ip:port>` in launch options to register automatically on every start.
+Heartbeats are sent every 30 seconds using the engine's own server socket (port 27015). All heartbeat fields are resolved from the engine at runtime:
+
+| Field | Source |
+|-------|--------|
+| `protocol` | Parsed from `sv_version` cvar |
+| `version` | Parsed from `sv_version` cvar |
+| `map` | Engine server structure (pattern scanned) |
+| `maxplayers` | Engine server structure (pattern scanned) |
+| `players` / `bots` | Client array iteration |
+| `gamedir` | Engine gamedir buffer (pattern scanned) |
+| `password` | `sv_password` cvar |
+| `lan` | `sv_lan` cvar |
+| `secure` | `-insecure` command line detection |
+| `type` | `l` (listen) or `d` (dedicated) via module check |
+
+When the server is stopped, heartbeats cease automatically. You can also put `setmaster <ip:port>` in `config.cfg` or use `+setmaster <ip:port>` in launch options for automatic registration on every start.
 
 ## Building from Source
 
@@ -153,9 +152,22 @@ bash build.sh
 
 ## Technical Details
 
-### mastersrv.dll Exports
+### Architecture
 
-The proxy DLL exports all functions needed by both ServerBrowser.dll versions:
+```
+ServerBrowser.dll (patched: steam_api.dll → mastersrv.dll)
+    ↓ loads
+mastersrv.dll (proxy DLL)
+    ├── Intercepts: SteamMatchmakingServers, SteamAPI_RunCallbacks, etc.
+    ├── Forwards: SteamFriends, SteamApps, SteamMatchmaking → real steam_api.dll
+    ├── Queries: MasterServers.vdf → HL1 UDP master protocol
+    ├── A2S_INFO: Sliding window (128 concurrent, 2s per-server timeout)
+    ├── Caches: platform/cache/servers.dat
+    ├── Engine hook: pattern scans hw.dll for console commands, cvars, server state
+    └── Heartbeat: challenge-response via engine's server socket (port 27015)
+```
+
+### Proxy DLL Exports
 
 | Function | Pre-Anniversary | Anniversary |
 |----------|:-:|:-:|
@@ -172,12 +184,32 @@ The proxy DLL exports all functions needed by both ServerBrowser.dll versions:
 | SteamApps | x | |
 | SteamMatchmaking | x | |
 
-### Master Server Protocol
+### Engine Integration (Runtime Pattern Scanning)
 
-The Valve HL1 master server UDP protocol:
+mastersrv.dll hooks into the engine without modifying any files. During the first `SteamAPI_RunCallbacks`, it scans `hw.dll` memory to resolve:
 
-- **Request**: `0x31` + region (1 byte) + last IP:port string + filter string
-- **Response**: `0xFFFFFFFF` + `0x0A66` + repeated (IP:4B + port:2B) big-endian, terminated by `0.0.0.0:0`
-- Pagination: last received address used as cursor for next request
+| Function/Address | Discovery Method |
+|-----------------|-----------------|
+| `Cmd_AddCommand` | String `"Cmd_AddCommand: %s already defined as a var"` → xref → function start |
+| `Cmd_Argc` / `Cmd_Argv` / `Con_Printf` | From original `setmaster` handler's call targets |
+| `Cvar_FindVar` | String `"Cvar_RegisterVariable: %s is a command"` → first CALL in that function |
+| Server state pointer | `MOV ECX, [addr]` in setmaster handler |
+| Map name buffer | String `"map     :  %s at"` → PUSH before it |
+| Maxplayers pointer | String `"players :  %i active (%i max)"` → MOV before it |
+| Client array base | `maxplayers_addr - 4` |
+| `ip_sockets[]` array | String `"NET_SendPacket: bad address type"` → `MOV ESI,[EDI*4+base]` in that function |
+| Command linked list head | `MOV reg, [addr]` in `Cmd_AddCommand` body |
 
+### Protocols
 
+**Master Server Query** (client → master):
+- Request: `0x31` + region + last IP:port + filter string
+- Response: `0xFFFFFFFF 0x66 0x0A` + (IP:4B + port:2B)* + `0.0.0.0:0`
+
+**Heartbeat** (server → master):
+- Challenge: `0xFFFFFFFF 0x71` → master replies `0xFFFFFFFF 0x73 0x0A` + 4-byte challenge
+- Registration: `0\n\protocol\48\challenge\<N>\players\<N>\max\<N>\bots\<N>\gamedir\<S>\map\<S>\type\<l|d>\password\<0|1>\os\w\secure\<0|1>\lan\<0|1>\version\<S>\region\255\product\<S>\n`
+
+**A2S_INFO** (client → game server):
+- Request: `0xFFFFFFFF 0x54 "Source Engine Query\0"`
+- Response: Server name, map, players, maxplayers, bots, ping, etc.
