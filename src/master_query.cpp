@@ -205,3 +205,53 @@ bool master_query_servers(const char *master_addr, master_query_result_t *result
 	CLOSE_SOCKET(sock);
 	return result->count > 0;
 }
+
+bool master_validate_server(const char *master_addr)
+{
+	char hostname[256];
+	strncpy(hostname, master_addr, sizeof(hostname) - 1);
+	hostname[sizeof(hostname) - 1] = '\0';
+
+	uint16_t port = PORT_MASTER;
+	char *colon = strrchr(hostname, ':');
+	if (colon)
+	{
+		*colon = '\0';
+		int p = atoi(colon + 1);
+		if (p > 0 && p < 65536) port = (uint16_t)p;
+	}
+
+	uint32_t ip = host2ip(hostname);
+	if (ip == 0 || ip == (uint32_t)-1) return false;
+
+	struct sockaddr_in dest;
+	memset(&dest, 0, sizeof(dest));
+	dest.sin_family = AF_INET;
+	dest.sin_addr.s_addr = ip;
+	dest.sin_port = htons(port);
+
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock == INVALID_SOCKET) return false;
+
+	uint8_t pkt[512];
+	int pkt_len = 0;
+	if (!build_query_packet(pkt, &pkt_len, sizeof(pkt), 0xFF, "0.0.0.0:0", "\\gamedir\\cstrike"))
+	{
+		CLOSE_SOCKET(sock);
+		return false;
+	}
+
+	sendto(sock, (const char *)pkt, pkt_len, 0, (struct sockaddr *)&dest, sizeof(dest));
+
+	fd_set readfds;
+	FD_ZERO(&readfds);
+	FD_SET(sock, &readfds);
+
+	struct timeval tv;
+	tv.tv_sec = 2;
+	tv.tv_usec = 0;
+
+	int sel = select((int)sock + 1, &readfds, NULL, NULL, &tv);
+	CLOSE_SOCKET(sock);
+	return sel > 0;
+}

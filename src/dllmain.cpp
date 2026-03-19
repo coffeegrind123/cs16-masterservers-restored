@@ -2,8 +2,12 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdarg.h>
 #include "matchmaking_impl.h"
+#include "master_query.h"
+#include "vdf_parser.h"
+#include "utils.h"
 
 static HMODULE g_hSelf = NULL;
 static HMODULE g_hRealSteamApi = NULL;
@@ -38,6 +42,256 @@ void RealMasterLog(const char *fmt, ...)
 	fprintf(f, "\n");
 	fclose(f);
 	LeaveCriticalSection(&g_logCS);
+}
+
+typedef int (__cdecl *CmdArgc_t)(void);
+typedef const char *(__cdecl *CmdArgv_t)(int n);
+typedef void (__cdecl *ConPrintf_t)(const char *fmt, ...);
+
+static CmdArgc_t g_pCmdArgc = NULL;
+static CmdArgv_t g_pCmdArgv = NULL;
+static ConPrintf_t g_pConPrintf = NULL;
+static bool g_engineHooked = false;
+
+extern bool g_MasterListLoaded;
+
+static uint8_t *FindPattern(uint8_t *start, size_t len, const uint8_t *pattern, size_t patLen)
+{
+	for (size_t i = 0; i + patLen <= len; i++)
+	{
+		if (memcmp(start + i, pattern, patLen) == 0)
+			return start + i;
+	}
+	return NULL;
+}
+
+static void *ResolveCall(uint8_t *callInstr)
+{
+	if (*callInstr != 0xE8) return NULL;
+	int32_t rel = *(int32_t *)(callInstr + 1);
+	return (void *)(callInstr + 5 + rel);
+}
+
+static void Cmd_SetMaster(void)
+{
+	if (!g_pCmdArgc || !g_pCmdArgv || !g_pConPrintf) return;
+
+	int argc = g_pCmdArgc();
+	if (argc < 2)
+	{
+		g_pConPrintf("Usage: setmaster <ip[:port]>\n");
+		g_pConPrintf("  Sets the master server for Internet server browser.\n");
+		g_pConPrintf("  Default port: 27010\n");
+		return;
+	}
+
+	char full_addr[256];
+	full_addr[0] = '\0';
+	for (int i = 1; i < argc; i++)
+	{
+		const char *arg = g_pCmdArgv(i);
+		if (strcmp(arg, ":") == 0) continue;
+		if (full_addr[0] && !strchr(full_addr, ':'))
+		{
+			strncat(full_addr, ":", sizeof(full_addr) - strlen(full_addr) - 1);
+		}
+		strncat(full_addr, arg, sizeof(full_addr) - strlen(full_addr) - 1);
+	}
+	if (!strchr(full_addr, ':'))
+		strncat(full_addr, ":27010", sizeof(full_addr) - strlen(full_addr) - 1);
+
+	g_pConPrintf("Verifying master server %s...\n", full_addr);
+
+	if (!master_validate_server(full_addr))
+	{
+		g_pConPrintf("Error: Master server %s is not responding.\n", full_addr);
+		return;
+	}
+	g_pConPrintf("Master server OK.\n");
+
+	char vdf_path[512];
+	snprintf(vdf_path, sizeof(vdf_path), "%s\\platform\\config\\MasterServers.vdf", g_selfDir);
+	if (!vdf_write_master_server(vdf_path, full_addr))
+	{
+		g_pConPrintf("Error: Could not write config file.\n");
+		return;
+	}
+
+	g_MasterListLoaded = false;
+	g_pConPrintf("Master server set to %s\n", full_addr);
+}
+
+static void InitEngineHook()
+{
+	if (g_engineHooked) return;
+
+	HMODULE hHw = GetModuleHandleA("hw.dll");
+	if (!hHw) return;
+
+	IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)hHw;
+	IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((uint8_t *)hHw + dos->e_lfanew);
+	uint8_t *base = (uint8_t *)hHw;
+	size_t imageSize = nt->OptionalHeader.SizeOfImage;
+
+	const char *needle = "Cmd_AddCommand: %s already defined as a var";
+	size_t needleLen = strlen(needle);
+	uint8_t *strAddr = FindPattern(base, imageSize, (const uint8_t *)needle, needleLen);
+	if (!strAddr)
+	{
+		RealMasterLog("Engine hook: could not find Cmd_AddCommand string");
+		return;
+	}
+
+	uint8_t pushBytes[5];
+	pushBytes[0] = 0x68;
+	memcpy(pushBytes + 1, &strAddr, 4);
+	uint8_t *pushRef = FindPattern(base, imageSize, pushBytes, 5);
+	if (!pushRef)
+	{
+		RealMasterLog("Engine hook: could not find xref to Cmd_AddCommand string");
+		return;
+	}
+
+	uint8_t *fnStart = pushRef;
+	while (fnStart > base && !(fnStart[0] == 0x55 && fnStart[1] == 0x8B && fnStart[2] == 0xEC))
+	{
+		if (fnStart[0] == 0xCC && fnStart[1] != 0xCC)
+		{
+			fnStart = fnStart + 1;
+			break;
+		}
+		fnStart--;
+	}
+	RealMasterLog("Engine hook: Cmd_AddCommand at %p", fnStart);
+
+	const char *smNeedle = "setmaster";
+	size_t smLen = strlen(smNeedle) + 1;
+	uint8_t *smStr = FindPattern(base, imageSize, (const uint8_t *)smNeedle, smLen);
+	if (!smStr)
+	{
+		RealMasterLog("Engine hook: could not find 'setmaster' string");
+		return;
+	}
+
+	uint8_t smPush[5];
+	smPush[0] = 0x68;
+	memcpy(smPush + 1, &smStr, 4);
+	uint8_t *smPushRef = FindPattern(base, imageSize, smPush, 5);
+	if (!smPushRef)
+	{
+		RealMasterLog("Engine hook: could not find xref to 'setmaster'");
+		return;
+	}
+
+	uint8_t *handlerPush = smPushRef - 5;
+	if (handlerPush[0] != 0x68)
+	{
+		RealMasterLog("Engine hook: unexpected instruction before setmaster push");
+		return;
+	}
+	void *origHandler = *(void **)(handlerPush + 1);
+	RealMasterLog("Engine hook: original setmaster handler at %p", origHandler);
+
+	uint8_t *handler = (uint8_t *)origHandler;
+	uint8_t *scan = handler;
+	uint8_t *scanEnd = handler + 64;
+
+	while (scan < scanEnd)
+	{
+		if (scan[0] == 0xE8)
+		{
+			g_pCmdArgc = (CmdArgc_t)ResolveCall(scan);
+			RealMasterLog("Engine hook: Cmd_Argc at %p", g_pCmdArgc);
+			break;
+		}
+		scan++;
+	}
+	while (scan < scanEnd)
+	{
+		if (scan[0] == 0x68 && scan[5] == 0xE8)
+		{
+			g_pConPrintf = (ConPrintf_t)ResolveCall(scan + 5);
+			RealMasterLog("Engine hook: Con_Printf at %p", g_pConPrintf);
+			break;
+		}
+		scan++;
+	}
+
+	scan = handler + 5;
+	while (scan < scanEnd)
+	{
+		if (scan[0] == 0x6A && scan[1] == 0x01 && scan[2] == 0xE8)
+		{
+			g_pCmdArgv = (CmdArgv_t)ResolveCall(scan + 2);
+			RealMasterLog("Engine hook: Cmd_Argv at %p", g_pCmdArgv);
+			break;
+		}
+		scan++;
+	}
+
+	if (!g_pCmdArgc || !g_pCmdArgv || !g_pConPrintf)
+	{
+		RealMasterLog("Engine hook: failed to resolve all functions (argc=%p argv=%p printf=%p)",
+			g_pCmdArgc, g_pCmdArgv, g_pConPrintf);
+		return;
+	}
+
+	struct cmd_node_t { cmd_node_t *next; const char *name; void (*handler)(); int flags; };
+
+	void **ppCmdHead = NULL;
+	scan = fnStart;
+	scanEnd = fnStart + 128;
+	while (scan < scanEnd)
+	{
+		if (scan[0] == 0xA1)
+		{
+			void **candidate = *(void ***)(scan + 1);
+			if (!IsBadReadPtr(candidate, 4) && !IsBadReadPtr(*candidate, 16))
+			{
+				cmd_node_t *test = (cmd_node_t *)*candidate;
+				if (!IsBadReadPtr(test, 16) && !IsBadReadPtr(test->name, 4))
+				{
+					ppCmdHead = candidate;
+					RealMasterLog("Engine hook: command list head at %p", ppCmdHead);
+					break;
+				}
+			}
+		}
+		if (scan[0] == 0x8B && (scan[1] == 0x35 || scan[1] == 0x0D || scan[1] == 0x15))
+		{
+			void **candidate = *(void ***)(scan + 2);
+			if (!IsBadReadPtr(candidate, 4) && !IsBadReadPtr(*candidate, 16))
+			{
+				cmd_node_t *test = (cmd_node_t *)*candidate;
+				if (!IsBadReadPtr(test, 16) && !IsBadReadPtr(test->name, 4))
+				{
+					ppCmdHead = candidate;
+					RealMasterLog("Engine hook: command list head at %p (via MOV reg)", ppCmdHead);
+					break;
+				}
+			}
+		}
+		scan++;
+	}
+
+	if (!ppCmdHead)
+	{
+		RealMasterLog("Engine hook: could not find command list head pointer");
+		return;
+	}
+
+	for (cmd_node_t *node = (cmd_node_t *)*ppCmdHead; node; node = node->next)
+	{
+		if (node->name && stricmp(node->name, "setmaster") == 0)
+		{
+			node->handler = Cmd_SetMaster;
+			RealMasterLog("Engine hook: replaced setmaster handler at node %p", node);
+			g_engineHooked = true;
+			return;
+		}
+	}
+
+	RealMasterLog("Engine hook: setmaster command not found in command list");
 }
 
 typedef void *(*GenericSteamFunc_t)();
@@ -113,6 +367,8 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 {
 	LOAD_REAL_FUNC(SteamAPI_RunCallbacks)
 	if (pfn_SteamAPI_RunCallbacks) pfn_SteamAPI_RunCallbacks();
+
+	InitEngineHook();
 
 	CRealMasterMatchmaking *p = (CRealMasterMatchmaking *)GetRealMasterMatchmaking();
 	p->DispatchCallbacks();

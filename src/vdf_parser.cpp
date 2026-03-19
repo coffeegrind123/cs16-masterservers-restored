@@ -1,3 +1,4 @@
+#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -119,4 +120,34 @@ bool vdf_parse_master_servers(const char *filepath, master_list_t *out)
 
 	delete[] buf;
 	return out->count > 0;
+}
+
+bool vdf_write_master_server(const char *filepath, const char *addr)
+{
+	char dir[512];
+	strncpy(dir, filepath, sizeof(dir) - 1);
+	dir[sizeof(dir) - 1] = '\0';
+	char *slash = strrchr(dir, '\\');
+	if (!slash) slash = strrchr(dir, '/');
+	if (slash)
+	{
+		*slash = '\0';
+		CreateDirectoryA(dir, NULL);
+	}
+
+	FILE *f = fopen(filepath, "w");
+	if (!f) return false;
+	fprintf(f,
+		"\"MasterServers\"\n"
+		"{\n"
+		"\t\"hl1\"\n"
+		"\t{\n"
+		"\t\t\"0\"\n"
+		"\t\t{\n"
+		"\t\t\t\"addr\"\t\"%s\"\n"
+		"\t\t}\n"
+		"\t}\n"
+		"}\n", addr);
+	fclose(f);
+	return true;
 }

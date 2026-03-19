@@ -14,7 +14,7 @@ extern void RealMasterLog(const char *fmt, ...);
 
 static CRealMasterMatchmaking g_RealMaster;
 static master_list_t g_MasterList;
-static bool g_MasterListLoaded = false;
+bool g_MasterListLoaded = false;
 
 struct QueryThreadData
 {
@@ -101,10 +101,11 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 				master_result.servers[total] = result.servers[i];
 				total++;
 			}
+			break;
 		}
 		else
 		{
-			RealMasterLog("  FAILED to query %s", g_MasterList.entries[m].addr);
+			RealMasterLog("  FAILED to query %s, trying next...", g_MasterList.entries[m].addr);
 		}
 	}
 

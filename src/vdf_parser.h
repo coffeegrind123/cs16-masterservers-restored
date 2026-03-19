@@ -14,3 +14,4 @@ struct master_list_t
 };
 
 bool vdf_parse_master_servers(const char *filepath, master_list_t *out);
+bool vdf_write_master_server(const char *filepath, const char *addr);

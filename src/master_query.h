@@ -18,3 +18,4 @@ struct master_query_result_t
 };
 
 bool master_query_servers(const char *master_addr, master_query_result_t *result);
+bool master_validate_server(const char *master_addr);
