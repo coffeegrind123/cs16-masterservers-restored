@@ -20,13 +20,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-mingw-w64-i686 g++-mingw-w64-i686
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
       - name: Install DepotDownloader
-        run: dotnet tool install -g DepotDownloader
+        run: |
+          wget -qO /tmp/dd.zip https://github.com/SteamRE/DepotDownloader/releases/latest/download/DepotDownloader-linux-x64.zip
+          sudo unzip -o /tmp/dd.zip -d /usr/local/bin/
+          sudo chmod +x /usr/local/bin/DepotDownloader
 
       - name: Fetch ServerBrowser.dll from Steam
         env:
