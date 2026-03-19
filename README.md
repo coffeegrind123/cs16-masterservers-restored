@@ -105,8 +105,9 @@ mastersrv.dll includes full heartbeat support for listen servers using the [Valv
 1. Install the mod as described above
 2. Start a game (New Game or `map <mapname>` in console)
 3. Set `sv_lan 0` to make the server visible on the internet
-4. Run `setmaster <master_ip:port>` to register with a master server
-5. Your server will appear in other players' server browsers
+4. On the Anniversary edition, untick "Enable Steam Networking" in the server creation dialog
+5. Run `setmaster <master_ip:port>` to register with a master server
+6. Your server will appear in other players' server browsers
 
 Heartbeats are sent every 30 seconds using the engine's own server socket (port 27015). All heartbeat fields are resolved from the engine at runtime:
 
