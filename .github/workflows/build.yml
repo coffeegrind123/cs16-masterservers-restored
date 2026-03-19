@@ -42,6 +42,14 @@ jobs:
           echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
           echo "tag=v$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Compute DLL hashes
+        id: hashes
+        run: |
+          echo "mastersrv=$(sha256sum Release/mastersrv.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sb_legacy=$(sha256sum Release/platform/servers/ServerBrowser.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "sb_anniv=$(sha256sum Release-anniversary/platform/servers/ServerBrowser.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "gold_steamapi=$(sha256sum Release-goldclient/steam_api.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
       - name: Package Pre-Anniversary
         run: |
           cd Release
@@ -79,6 +87,15 @@ jobs:
             | **Pre-Anniversary** | Steam Legacy build (pre-25th anniversary update) |
             | **Anniversary** | 25th Anniversary Update build |
             | **GoldClient** | CSPro/GoldClient (non-Steam) |
+
+            ## SHA-256 Hashes
+
+            | File | Hash |
+            |------|------|
+            | `mastersrv.dll` | `${{ steps.hashes.outputs.mastersrv }}` |
+            | `ServerBrowser.dll` (pre-anniversary) | `${{ steps.hashes.outputs.sb_legacy }}` |
+            | `ServerBrowser.dll` (anniversary) | `${{ steps.hashes.outputs.sb_anniv }}` |
+            | `steam_api.dll` (goldclient) | `${{ steps.hashes.outputs.gold_steamapi }}` |
 
             See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for installation instructions.
           draft: false
