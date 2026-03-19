@@ -9,7 +9,8 @@ static HMODULE g_hSelf = NULL;
 static HMODULE g_hRealSteamApi = NULL;
 static bool g_bRealSteamResolved = false;
 static bool g_bWsaInit = false;
-static FILE *g_logFile = NULL;
+static char g_logPath[MAX_PATH] = {0};
+static bool g_logTruncated = false;
 static CRITICAL_SECTION g_logCS;
 static bool g_logCSInit = false;
 
@@ -19,22 +20,23 @@ void RealMasterLog(const char *fmt, ...)
 {
 	if (!g_logCSInit) return;
 	EnterCriticalSection(&g_logCS);
-	if (!g_logFile)
+	if (!g_logPath[0])
 	{
-		char logpath[MAX_PATH];
 		if (g_selfDir[0])
-			snprintf(logpath, sizeof(logpath), "%s\\mastersrv_debug.log", g_selfDir);
+			snprintf(g_logPath, sizeof(g_logPath), "%s\\mastersrv_debug.log", g_selfDir);
 		else
-			strcpy(logpath, "mastersrv_debug.log");
-		g_logFile = fopen(logpath, "w");
-		if (!g_logFile) { LeaveCriticalSection(&g_logCS); return; }
+			strcpy(g_logPath, "mastersrv_debug.log");
 	}
+	const char *mode = g_logTruncated ? "a" : "w";
+	FILE *f = fopen(g_logPath, mode);
+	if (!f) { LeaveCriticalSection(&g_logCS); return; }
+	g_logTruncated = true;
 	va_list ap;
 	va_start(ap, fmt);
-	vfprintf(g_logFile, fmt, ap);
+	vfprintf(f, fmt, ap);
 	va_end(ap);
-	fprintf(g_logFile, "\n");
-	fflush(g_logFile);
+	fprintf(f, "\n");
+	fclose(f);
 	LeaveCriticalSection(&g_logCS);
 }
 
@@ -202,7 +204,6 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 	}
 	else if (fdwReason == DLL_PROCESS_DETACH)
 	{
-		if (g_logFile) { fclose(g_logFile); g_logFile = NULL; }
 		if (g_logCSInit) { DeleteCriticalSection(&g_logCS); g_logCSInit = false; }
 	}
 	return TRUE;

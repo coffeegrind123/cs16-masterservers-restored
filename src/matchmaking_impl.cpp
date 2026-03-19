@@ -462,7 +462,7 @@ int CRealMasterMatchmaking::GetServerCount(HServerListRequest hRequest)
 	if (IsOurRequest(hRequest, m_requestCounter))
 	{
 		DispatchCallbacks();
-		return m_serverCount;
+		return m_lastDispatchedIdx;
 	}
 	if (m_pRealSteam) return m_pRealSteam->GetServerCount(hRequest);
 	return 0;
