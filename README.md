@@ -107,11 +107,18 @@ If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
 
 ## Building from Source
 
-Requires MinGW cross-compiler (i686-w64-mingw32-g++) and Python 3.
+Requires MinGW cross-compiler (i686-w64-mingw32-g++), Python 3, and [DepotDownloader](https://github.com/SteamRE/DepotDownloader).
+
+The original `ServerBrowser.dll` binaries (for both pre-anniversary and anniversary builds) are not stored in this repository. They are downloaded directly from Steam's CDN at build time using DepotDownloader, which pulls them from the Counter-Strike 1.6 client depots (app 10, branches `steam_legacy` and `public`). A Steam account that owns CS 1.6 is required.
 
 ```bash
 # Install dependencies (Debian/Ubuntu)
 sudo apt-get install gcc-mingw-w64-i686 g++-mingw-w64-i686 python3
+
+# Fetch original ServerBrowser.dll from Steam (requires credentials)
+export STEAM_USERNAME="your_username"
+export STEAM_PASSWORD="your_password"
+bash scripts/fetch_originals.sh
 
 # Build all three variants
 make -f Makefile.mingw
@@ -121,6 +128,8 @@ make -f Makefile.mingw
 #   Release-anniversary/      - Anniversary build
 #   Release-goldclient/       - GoldClient patched DLL
 ```
+
+The CI workflow handles this automatically using GitHub Actions secrets.
 
 ## Technical Details
 
