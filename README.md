@@ -107,29 +107,28 @@ If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
 
 ## Building from Source
 
-Requires MinGW cross-compiler (i686-w64-mingw32-g++), Python 3, and [DepotDownloader](https://github.com/SteamRE/DepotDownloader).
+Requires MinGW cross-compiler (i686-w64-mingw32-g++), Python 3, and a Steam account that owns CS 1.6.
 
-The original `ServerBrowser.dll` binaries (for both pre-anniversary and anniversary builds) are not stored in this repository. They are downloaded directly from Steam's CDN at build time using DepotDownloader, which pulls them from the Counter-Strike 1.6 client depots (app 10, branches `steam_legacy` and `public`). A Steam account that owns CS 1.6 is required.
+The original `ServerBrowser.dll` binaries are not stored in this repository. They are fetched from Steam's CDN at build time using [DepotDownloader](https://github.com/SteamRE/DepotDownloader), pulling from the CS 1.6 client depots (app 10, branches `steam_legacy` and `public`).
 
 ```bash
 # Install dependencies (Debian/Ubuntu)
 sudo apt-get install gcc-mingw-w64-i686 g++-mingw-w64-i686 python3
 
-# Fetch original ServerBrowser.dll from Steam (requires credentials)
-export STEAM_USERNAME="your_username"
-export STEAM_PASSWORD="your_password"
-bash scripts/fetch_originals.sh
+# Create .env with your Steam credentials (gitignored)
+echo 'STEAM_USERNAME=your_username' > .env
+echo 'STEAM_PASSWORD=your_password' >> .env
 
-# Build all three variants
-make -f Makefile.mingw
+# Build everything — fetches originals, compiles, patches, packages
+bash build.sh
 
-# Output:
-#   Release/                  - Pre-anniversary build
-#   Release-anniversary/      - Anniversary build
-#   Release-goldclient/       - GoldClient patched DLL
+# Output in dist/
+#   cs16-masterservers-pre-anniversary.zip
+#   cs16-masterservers-anniversary.zip
+#   cs16-masterservers-goldclient.zip
 ```
 
-The CI workflow handles this automatically using GitHub Actions secrets.
+`build.sh` installs DepotDownloader automatically if not found. The CI workflow uses GitHub Actions secrets for credentials.
 
 ## Technical Details
 
