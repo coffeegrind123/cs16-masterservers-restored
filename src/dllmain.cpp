@@ -22,7 +22,7 @@ void RealMasterLog(const char *fmt, ...)
 			snprintf(logpath, sizeof(logpath), "%s\\mastersrv_debug.log", g_selfDir);
 		else
 			strcpy(logpath, "mastersrv_debug.log");
-		g_logFile = fopen(logpath, "a");
+		g_logFile = fopen(logpath, "w");
 		if (!g_logFile) return;
 	}
 	va_list ap;
