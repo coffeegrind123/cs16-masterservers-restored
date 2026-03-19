@@ -1,3 +1,4 @@
+dist/
 Release/
 Release-anniversary/
 Release-goldclient/
@@ -8,5 +9,6 @@ Release-goldclient/
 cspro-browser.mjs
 Half-Life/
 
+.env
 originals/pre-anniversary/*.dll
 originals/anniversary/*.dll
