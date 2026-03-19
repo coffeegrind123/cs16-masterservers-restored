@@ -160,6 +160,7 @@ private:
 	HANDLE m_hThread;
 	uint32_t m_requestCounter;
 	volatile bool m_queryDone;
+	volatile bool m_cancelRequested;
 	volatile int m_lastDispatchedIdx;
 	bool m_dispatching;
 

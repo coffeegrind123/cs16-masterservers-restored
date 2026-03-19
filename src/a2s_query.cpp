@@ -5,7 +5,7 @@
 #include <string.h>
 #include "a2s_query.h"
 
-static const uint8_t A2S_INFO_REQUEST[] = {
+const uint8_t A2S_INFO_REQUEST[] = {
 	0xFF, 0xFF, 0xFF, 0xFF,
 	0x54,
 	'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00
@@ -24,7 +24,7 @@ static const char *read_string(const uint8_t *data, int len, int *pos, char *out
 	return out;
 }
 
-static bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
+bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 {
 	if (len < 6) return false;
 	if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)

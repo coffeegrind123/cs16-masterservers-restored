@@ -52,6 +52,7 @@ CRealMasterMatchmaking::CRealMasterMatchmaking()
 	m_hThread = NULL;
 	m_requestCounter = 0;
 	m_queryDone = false;
+	m_cancelRequested = false;
 	m_lastDispatchedIdx = 0;
 	m_dispatching = false;
 	m_pRealSteam = NULL;
@@ -87,7 +88,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 	memset(&master_result, 0, sizeof(master_result));
 	int total = 0;
 
-	for (int m = 0; m < g_MasterList.count; m++)
+	for (int m = 0; m < g_MasterList.count && !data->self->m_cancelRequested; m++)
 	{
 		RealMasterLog("Querying master %s ...", g_MasterList.entries[m].addr);
 		master_query_result_t result;
@@ -140,15 +141,17 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 		cache_save(cache_path, &cache);
 	}
 
-	int batch_size = 64;
-	for (int base = 0; base < total; base += batch_size)
+	if (data->self->m_cancelRequested) { data->self->m_queryDone = true; delete data; return 0; }
+
+	int batch_size = 16;
+	for (int base = 0; base < total && !data->self->m_cancelRequested; base += batch_size)
 	{
 		int batch = total - base;
 		if (batch > batch_size) batch = batch_size;
 
-		uint32_t ips[64];
-		uint16_t ports[64];
-		a2s_server_info_t infos[64];
+		uint32_t ips[16];
+		uint16_t ports[16];
+		a2s_server_info_t infos[16];
 
 		for (int i = 0; i < batch; i++)
 		{
@@ -156,9 +159,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 			ports[i] = master_result.servers[base + i].port;
 		}
 
-		RealMasterLog("A2S batch %d-%d (%d servers)...", base, base+batch-1, batch);
-		int valid = a2s_query_batch(ips, ports, batch, infos, 3000);
-		RealMasterLog("A2S batch done: %d/%d responded", valid, batch);
+		int valid = a2s_query_batch(ips, ports, batch, infos, 2000);
 
 		for (int i = 0; i < batch; i++)
 		{
@@ -166,9 +167,10 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 			gameserveritem_t *gs = &data->servers[idx];
 			memset(gs, 0, sizeof(*gs));
 
+			gs->m_NetAdr.Init(ntohl(ips[i]), ntohs(ports[i]), ntohs(ports[i]));
+
 			if (infos[i].valid)
 			{
-				gs->m_NetAdr.Init(ntohl(ips[i]), ntohs(ports[i]), ntohs(ports[i]));
 				gs->m_nPing = infos[i].ping_ms;
 				gs->m_bHadSuccessfulResponse = true;
 				gs->SetName(infos[i].name);
@@ -184,12 +186,13 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 			}
 			else
 			{
-				gs->m_NetAdr.Init(ntohl(ips[i]), ntohs(ports[i]), ntohs(ports[i]));
 				gs->m_bHadSuccessfulResponse = false;
 			}
 
 			*data->serverCount = idx + 1;
 		}
+
+		RealMasterLog("A2S batch %d-%d: %d/%d responded", base, base+batch-1, valid, batch);
 	}
 
 	int responded = 0;
@@ -208,15 +211,14 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
 {
 	RealMasterLog("RequestInternetServerList(appID=%u, nFilters=%u, pResponse=%p)", iApp, nFilters, pResponse);
 
-	if (m_hThread && IsThreadAlive(m_hThread))
-	{
-		RealMasterLog("  Query in progress, returning existing handle");
-		m_pResponse = pResponse;
-		return (HServerListRequest)(uintptr_t)m_requestCounter;
-	}
-
 	if (m_hThread)
 	{
+		if (IsThreadAlive(m_hThread))
+		{
+			RealMasterLog("  Cancelling previous query");
+			m_cancelRequested = true;
+			WaitForSingleObject(m_hThread, 500);
+		}
 		CloseHandle(m_hThread);
 		m_hThread = NULL;
 	}
@@ -224,6 +226,7 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
 	m_serverCount = 0;
 	m_refreshing = true;
 	m_queryDone = false;
+	m_cancelRequested = false;
 	m_lastDispatchedIdx = 0;
 	m_pResponse = pResponse;
 	m_requestCounter++;
@@ -277,7 +280,20 @@ static bool IsOurRequest(HServerListRequest hRequest, uint32_t counter)
 
 void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 {
-	if (IsOurRequest(hRequest, m_requestCounter)) return;
+	if (IsOurRequest(hRequest, m_requestCounter))
+	{
+		RealMasterLog("ReleaseRequest called");
+		m_cancelRequested = true;
+		m_refreshing = false;
+		if (m_hThread)
+		{
+			WaitForSingleObject(m_hThread, 500);
+			CloseHandle(m_hThread);
+			m_hThread = NULL;
+		}
+		m_pResponse = NULL;
+		return;
+	}
 	if (m_pRealSteam) m_pRealSteam->ReleaseRequest(hRequest);
 }
 
@@ -294,7 +310,18 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
 
 void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
 {
-	if (IsOurRequest(hRequest, m_requestCounter)) return;
+	if (IsOurRequest(hRequest, m_requestCounter))
+	{
+		RealMasterLog("CancelQuery called");
+		m_cancelRequested = true;
+		if (m_pResponse)
+		{
+			m_pResponse->RefreshComplete(hRequest, eNoServersListedOnMasterServer);
+			RealMasterLog("Dispatched RefreshComplete after cancel");
+		}
+		m_refreshing = false;
+		return;
+	}
 	if (m_pRealSteam) m_pRealSteam->CancelQuery(hRequest);
 }
 
@@ -309,6 +336,12 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 	if (!m_pResponse) return;
 	if (m_dispatching) return;
 	m_dispatching = true;
+
+	if (m_cancelRequested)
+	{
+		m_dispatching = false;
+		return;
+	}
 
 	HServerListRequest hReq = (HServerListRequest)(uintptr_t)m_requestCounter;
 	int current = m_serverCount;
@@ -336,7 +369,7 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 	if (dispatched > 0)
 		RealMasterLog("Dispatched %d ServerResponded (dispatched %d/%d)", dispatched, m_lastDispatchedIdx, current);
 
-	if (m_queryDone && m_lastDispatchedIdx >= m_serverCount)
+	if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
 	{
 		int responded = 0;
 		for (int i = 0; i < m_serverCount; i++)
