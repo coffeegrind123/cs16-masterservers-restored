@@ -255,3 +255,97 @@ bool master_validate_server(const char *master_addr)
 	CLOSE_SOCKET(sock);
 	return sel > 0;
 }
+
+bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info)
+{
+	char hostname[256];
+	strncpy(hostname, master_addr, sizeof(hostname) - 1);
+	hostname[sizeof(hostname) - 1] = '\0';
+
+	uint16_t port = PORT_MASTER;
+	char *colon = strrchr(hostname, ':');
+	if (colon)
+	{
+		*colon = '\0';
+		int p = atoi(colon + 1);
+		if (p > 0 && p < 65536) port = (uint16_t)p;
+	}
+
+	uint32_t master_ip = host2ip(hostname);
+	if (master_ip == 0 || master_ip == (uint32_t)-1) return false;
+
+	struct sockaddr_in dest;
+	memset(&dest, 0, sizeof(dest));
+	dest.sin_family = AF_INET;
+	dest.sin_addr.s_addr = master_ip;
+	dest.sin_port = htons(port);
+
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock == INVALID_SOCKET) return false;
+
+	int reuse = 1;
+	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
+	struct sockaddr_in local;
+	memset(&local, 0, sizeof(local));
+	local.sin_family = AF_INET;
+	local.sin_addr.s_addr = INADDR_ANY;
+	local.sin_port = htons(info ? 27015 : 0);
+	bind(sock, (struct sockaddr *)&local, sizeof(local));
+
+	static const uint8_t challenge_req[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x71 };
+	sendto(sock, (const char *)challenge_req, sizeof(challenge_req), 0,
+		(struct sockaddr *)&dest, sizeof(dest));
+
+	fd_set readfds;
+	FD_ZERO(&readfds);
+	FD_SET(sock, &readfds);
+	struct timeval tv = { 2, 0 };
+
+	if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
+	{
+		CLOSE_SOCKET(sock);
+		return false;
+	}
+
+	uint8_t resp[64];
+	int resp_len = recvfrom(sock, (char *)resp, sizeof(resp), 0, NULL, NULL);
+	if (resp_len < 10 || resp[4] != 0x73)
+	{
+		CLOSE_SOCKET(sock);
+		return false;
+	}
+
+	uint32_t challenge;
+	memcpy(&challenge, resp + 6, 4);
+
+	const char *gamedir = (info && info->gamedir[0]) ? info->gamedir : "cstrike";
+	const char *map = (info && info->map[0]) ? info->map : "unknown";
+	const char *version = (info && info->version[0]) ? info->version : "1.1.2.7/Stdio";
+	int protocol = (info && info->protocol > 0) ? info->protocol : 48;
+	char stype = (info && info->is_dedicated) ? 'd' : 'l';
+
+	char heartbeat[1024];
+	snprintf(heartbeat, sizeof(heartbeat),
+		"0\n\\protocol\\%d\\challenge\\%u\\players\\%d\\max\\%d\\bots\\%d"
+		"\\gamedir\\%s\\map\\%s\\type\\%c\\password\\%d\\os\\w"
+		"\\secure\\%d\\lan\\%d\\version\\%s\\region\\255\\product\\%s\n",
+		protocol, challenge,
+		info ? info->players : 0,
+		info ? info->max_players : 16,
+		info ? info->bots : 0,
+		gamedir, map, stype,
+		info ? info->password : 0,
+		info ? info->secure : 0,
+		info ? info->lan : 0,
+		version, gamedir);
+
+	sendto(sock, heartbeat, (int)strlen(heartbeat), 0,
+		(struct sockaddr *)&dest, sizeof(dest));
+
+	RealMasterLog("Heartbeat sent to %s:%d (challenge=%u, map=%s, players=%d/%d, type=%c)",
+		hostname, port, challenge, map,
+		info ? info->players : 0, info ? info->max_players : 16, stype);
+
+	CLOSE_SOCKET(sock);
+	return true;
+}

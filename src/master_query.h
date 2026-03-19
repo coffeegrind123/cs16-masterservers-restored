@@ -19,3 +19,20 @@ struct master_query_result_t
 
 bool master_query_servers(const char *master_addr, master_query_result_t *result);
 bool master_validate_server(const char *master_addr);
+struct heartbeat_info_t
+{
+	char hostname[256];
+	char map[256];
+	char gamedir[64];
+	char version[64];
+	int protocol;
+	int players;
+	int max_players;
+	int bots;
+	int password;
+	int secure;
+	int lan;
+	int is_dedicated;
+};
+
+bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info);

@@ -20,6 +20,14 @@ static bool g_logCSInit = false;
 
 static char g_selfDir[512] = {0};
 static char g_pendingSetmaster[256] = {0};
+static void *g_pServerState = NULL;
+static char *g_pMapName = NULL;
+static int *g_pMaxPlayers = NULL;
+static uint8_t *g_pClientArray = NULL;
+static char *g_pGameDir = NULL;
+static DWORD g_lastHeartbeat = 0;
+static bool g_heartbeatActive = false;
+static char g_heartbeatMaster[256] = {0};
 
 static void StripQuotes(char *s)
 {
@@ -59,9 +67,13 @@ typedef int (__cdecl *CmdArgc_t)(void);
 typedef const char *(__cdecl *CmdArgv_t)(int n);
 typedef void (__cdecl *ConPrintf_t)(const char *fmt, ...);
 
+struct cvar_t { char *name; char *string; int flags; float value; cvar_t *next; };
+typedef cvar_t *(__cdecl *CvarFindVar_t)(const char *name);
+
 static CmdArgc_t g_pCmdArgc = NULL;
 static CmdArgv_t g_pCmdArgv = NULL;
 static ConPrintf_t g_pConPrintf = NULL;
+static CvarFindVar_t g_pCvarFindVar = NULL;
 static bool g_engineHooked = false;
 
 extern bool g_MasterListLoaded;
@@ -83,6 +95,84 @@ static void *ResolveCall(uint8_t *callInstr)
 	return (void *)(callInstr + 5 + rel);
 }
 
+static const char *GetCvarString(const char *name)
+{
+	if (!g_pCvarFindVar) return "";
+	cvar_t *cv = g_pCvarFindVar(name);
+	return (cv && cv->string) ? cv->string : "";
+}
+
+static float GetCvarFloat(const char *name)
+{
+	if (!g_pCvarFindVar) return 0.0f;
+	cvar_t *cv = g_pCvarFindVar(name);
+	return cv ? cv->value : 0.0f;
+}
+
+static void GatherHeartbeatInfo(heartbeat_info_t *info)
+{
+	memset(info, 0, sizeof(*info));
+
+	strncpy(info->hostname, GetCvarString("hostname"), sizeof(info->hostname) - 1);
+
+	if (g_pMapName && !IsBadReadPtr(g_pMapName, 4) && g_pMapName[0])
+		strncpy(info->map, g_pMapName, sizeof(info->map) - 1);
+
+	if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
+		strncpy(info->gamedir, g_pGameDir, sizeof(info->gamedir) - 1);
+	else
+		strncpy(info->gamedir, "cstrike", sizeof(info->gamedir) - 1);
+
+	if (g_pMaxPlayers && !IsBadReadPtr(g_pMaxPlayers, 4) && *g_pMaxPlayers > 0)
+		info->max_players = *g_pMaxPlayers;
+	else
+		info->max_players = 16;
+
+	info->password = (GetCvarString("sv_password")[0] && strcmp(GetCvarString("sv_password"), "none") != 0) ? 1 : 0;
+	info->lan = (int)GetCvarFloat("sv_lan");
+	info->secure = strstr(GetCommandLineA(), "-insecure") ? 0 : 1;
+
+	const char *sv_ver = GetCvarString("sv_version");
+	if (sv_ver[0])
+	{
+		strncpy(info->version, sv_ver, sizeof(info->version) - 1);
+		char *comma = strchr(info->version, ',');
+		if (comma) *comma = '\0';
+	}
+	else
+		strncpy(info->version, "1.1.2.7/Stdio", sizeof(info->version) - 1);
+
+	const char *sv_ver_full = GetCvarString("sv_version");
+	if (sv_ver_full[0])
+	{
+		const char *c1 = strchr(sv_ver_full, ',');
+		if (c1) info->protocol = atoi(c1 + 1);
+	}
+	if (info->protocol <= 0) info->protocol = 48;
+
+	info->is_dedicated = (GetModuleHandleA("swds.dll") != NULL) ? 1 : 0;
+
+	if (g_pClientArray && g_pMaxPlayers && !IsBadReadPtr(g_pMaxPlayers, 4))
+	{
+		int max = *g_pMaxPlayers;
+		if (max > 32) max = 32;
+		for (int i = 0; i < max; i++)
+		{
+			uint8_t *client = g_pClientArray + (i * 0x5018);
+			if (IsBadReadPtr(client, 0x230)) break;
+			if (*(int *)client == 0) continue;
+			info->players++;
+			if (*(uint8_t *)(client + 0x222) & 0x20)
+				info->bots++;
+		}
+	}
+
+	RealMasterLog("Heartbeat info: hostname='%s' map='%s' gamedir='%s' players=%d/%d bots=%d password=%d lan=%d secure=%d version='%s' protocol=%d type=%c",
+		info->hostname, info->map, info->gamedir, info->players, info->max_players,
+		info->bots, info->password, info->lan, info->secure, info->version,
+		info->protocol, info->is_dedicated ? 'd' : 'l');
+}
+
 static void Cmd_SetMaster(void)
 {
 	if (!g_pCmdArgc || !g_pCmdArgv || !g_pConPrintf) return;
@@ -95,6 +185,10 @@ static void Cmd_SetMaster(void)
 		g_pConPrintf("  Default port: 27010\n");
 		return;
 	}
+
+	const char *firstArg = g_pCmdArgv(1);
+	if (stricmp(firstArg, "enable") == 0 || stricmp(firstArg, "disable") == 0)
+		return;
 
 	char full_addr[256];
 	full_addr[0] = '\0';
@@ -131,6 +225,24 @@ static void Cmd_SetMaster(void)
 
 	g_MasterListLoaded = false;
 	g_pConPrintf("Master server set to %s\n", full_addr);
+
+	strncpy(g_heartbeatMaster, full_addr, sizeof(g_heartbeatMaster) - 1);
+	if (g_pServerState && *(int *)g_pServerState != 0)
+	{
+		g_heartbeatActive = true;
+		g_lastHeartbeat = 0;
+		heartbeat_info_t hbinfo;
+		GatherHeartbeatInfo(&hbinfo);
+		if (master_send_heartbeat(full_addr, &hbinfo))
+		{
+			g_pConPrintf("Server registered with master %s\n", full_addr);
+			g_lastHeartbeat = GetTickCount();
+		}
+		else
+		{
+			g_pConPrintf("Warning: Heartbeat to %s failed.\n", full_addr);
+		}
+	}
 }
 
 static void InitEngineHook()
@@ -205,6 +317,15 @@ static void InitEngineHook()
 	RealMasterLog("Engine hook: original setmaster handler at %p", origHandler);
 
 	uint8_t *handler = (uint8_t *)origHandler;
+	for (int i = 0; i < 20; i++)
+	{
+		if (handler[i] == 0x8B && handler[i + 1] == 0x0D)
+		{
+			g_pServerState = *(void **)(handler + i + 2);
+			RealMasterLog("Engine hook: server state at %p", g_pServerState);
+			break;
+		}
+	}
 	uint8_t *scan = handler;
 	uint8_t *scanEnd = handler + 64;
 
@@ -246,6 +367,121 @@ static void InitEngineHook()
 		RealMasterLog("Engine hook: failed to resolve all functions (argc=%p argv=%p printf=%p)",
 			g_pCmdArgc, g_pCmdArgv, g_pConPrintf);
 		return;
+	}
+
+	const char *cvarNeedle = "Cvar_RegisterVariable: %s is a command";
+	uint8_t *cvarStr = FindPattern(base, imageSize, (const uint8_t *)cvarNeedle, strlen(cvarNeedle));
+	if (cvarStr)
+	{
+		uint8_t cvarPush[5] = { 0x68 };
+		memcpy(cvarPush + 1, &cvarStr, 4);
+		uint8_t *cvarRef = FindPattern(base, imageSize, cvarPush, 5);
+		if (cvarRef)
+		{
+			uint8_t *cvarFn = cvarRef;
+			while (cvarFn > base && !(cvarFn[0] == 0x55 && cvarFn[1] == 0x8B && cvarFn[2] == 0xEC))
+			{
+				if (cvarFn[0] == 0xCC && cvarFn[1] != 0xCC) { cvarFn++; break; }
+				cvarFn--;
+			}
+			scan = cvarFn;
+			scanEnd = cvarFn + 32;
+			while (scan < scanEnd)
+			{
+				if (scan[0] == 0xE8)
+				{
+					g_pCvarFindVar = (CvarFindVar_t)ResolveCall(scan);
+					RealMasterLog("Engine hook: Cvar_FindVar at %p", g_pCvarFindVar);
+					break;
+				}
+				scan++;
+			}
+		}
+	}
+
+	const char *mapFmt = "map     :  %s at";
+	uint8_t *mapFmtAddr = FindPattern(base, imageSize, (const uint8_t *)mapFmt, strlen(mapFmt));
+	if (mapFmtAddr)
+	{
+		uint8_t mapPush[5] = { 0x68 };
+		memcpy(mapPush + 1, &mapFmtAddr, 4);
+		uint8_t *mapRef = FindPattern(base, imageSize, mapPush, 5);
+		if (mapRef)
+		{
+			for (uint8_t *p = mapRef - 20; p < mapRef; p++)
+			{
+				if (p[0] == 0x68)
+				{
+					char *candidate = *(char **)(p + 1);
+					if (!IsBadReadPtr(candidate, 4))
+					{
+						g_pMapName = candidate;
+						RealMasterLog("Engine hook: map name buffer at %p", g_pMapName);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	const char *playersFmt = "players :  %i active (%i max)";
+	uint8_t *playersStr = FindPattern(base, imageSize, (const uint8_t *)playersFmt, strlen(playersFmt));
+	if (playersStr)
+	{
+		uint8_t playersPush[5] = { 0x68 };
+		memcpy(playersPush + 1, &playersStr, 4);
+		uint8_t *playersRef = FindPattern(base, imageSize, playersPush, 5);
+		if (playersRef)
+		{
+			for (uint8_t *p = playersRef - 20; p < playersRef; p++)
+			{
+				if (p[0] == 0x8B && (p[1] == 0x0D || p[1] == 0x15 || p[1] == 0x35))
+				{
+					int *candidate = *(int **)(p + 2);
+					if (!IsBadReadPtr(candidate, 4))
+					{
+						g_pMaxPlayers = candidate;
+						RealMasterLog("Engine hook: maxplayers at %p (value=%d)", g_pMaxPlayers, *g_pMaxPlayers);
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	if (g_pMaxPlayers)
+	{
+		uint8_t **ppClientBase = (uint8_t **)(((uint8_t *)g_pMaxPlayers) - 4);
+		if (!IsBadReadPtr(ppClientBase, 4) && !IsBadReadPtr(*ppClientBase, 4))
+		{
+			g_pClientArray = *ppClientBase;
+			RealMasterLog("Engine hook: client array at %p", g_pClientArray);
+		}
+	}
+
+	const char *gdNeedle = "*gamedir";
+	uint8_t *gdStr = FindPattern(base, imageSize, (const uint8_t *)gdNeedle, strlen(gdNeedle) + 1);
+	if (gdStr)
+	{
+		uint8_t gdPush[5] = { 0x68 };
+		memcpy(gdPush + 1, &gdStr, 4);
+		uint8_t *gdRef = FindPattern(base, imageSize, gdPush, 5);
+		if (gdRef)
+		{
+			for (uint8_t *p = gdRef + 5; p < gdRef + 30; p++)
+			{
+				if (p[0] == 0x68)
+				{
+					char *candidate = *(char **)(p + 1);
+					if (!IsBadReadPtr(candidate, 4) && candidate >= (char*)base && candidate < (char*)(base + imageSize))
+					{
+						g_pGameDir = candidate;
+						RealMasterLog("Engine hook: gamedir at %p ('%s')", g_pGameDir, g_pGameDir);
+						break;
+					}
+				}
+			}
+		}
 	}
 
 	struct cmd_node_t { cmd_node_t *next; const char *name; void (*handler)(); int flags; };
@@ -413,6 +649,26 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 		{
 			if (g_pConPrintf)
 				g_pConPrintf("Error: Master server %s is not responding.\n", full_addr);
+		}
+	}
+
+	if (g_heartbeatActive && g_heartbeatMaster[0])
+	{
+		if (g_pServerState && *(int *)g_pServerState != 0)
+		{
+			DWORD now = GetTickCount();
+			if (now - g_lastHeartbeat > 30000)
+			{
+				g_lastHeartbeat = now;
+				heartbeat_info_t hbinfo;
+				GatherHeartbeatInfo(&hbinfo);
+				master_send_heartbeat(g_heartbeatMaster, &hbinfo);
+			}
+		}
+		else
+		{
+			g_heartbeatActive = false;
+			RealMasterLog("Server stopped, disabling heartbeat");
 		}
 	}
 

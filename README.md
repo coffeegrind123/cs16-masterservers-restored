@@ -101,8 +101,30 @@ setmaster <ip[:port]>
 - Writes to `MasterServers.vdf` and reloads the config immediately
 - Default port is 27010 if not specified
 - Also works from launch options (`+setmaster ip:port`) or `config.cfg`
+- If a listen server is running, automatically registers it with the master via heartbeat
 
 The command hooks into the engine's console system at runtime via pattern scanning — no engine files are modified.
+
+### Heartbeat (Listen Server Registration)
+
+When `setmaster` is used while hosting a listen server, mastersrv.dll automatically registers the server with the master using the HL1 heartbeat protocol:
+
+1. Sends a challenge request to the master server
+2. Receives and echoes the challenge value
+3. Sends a registration packet with server info (hostname, map, players, maxplayers, etc.)
+4. Repeats every 30 seconds while the server is running
+
+Server info (hostname, map, maxplayers, password, LAN mode) is read directly from the engine's memory via pattern-scanned function pointers and structure offsets. Heartbeats are sent from the game server's UDP port (27015) so the master lists the correct address. When the server is stopped, heartbeats cease automatically.
+
+#### Hosting a Listen Server
+
+1. Install the mod as described above
+2. Start a game (New Game or `map <mapname>` in console)
+3. Set `sv_lan 0` if you want the server visible on the internet
+4. Run `setmaster <master_ip:port>` to register with a master server
+5. Your server will appear in other players' server browsers
+
+You can also put `setmaster <master_ip:port>` in your `config.cfg` or use `+setmaster <master_ip:port>` in launch options to register automatically on every start.
 
 ## Building from Source
 
