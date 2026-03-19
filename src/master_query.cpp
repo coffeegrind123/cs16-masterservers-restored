@@ -256,7 +256,7 @@ bool master_validate_server(const char *master_addr)
 	return sel > 0;
 }
 
-bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info)
+bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info, SOCKET use_socket)
 {
 	char hostname[256];
 	strncpy(hostname, master_addr, sizeof(hostname) - 1);
@@ -280,17 +280,9 @@ bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info
 	dest.sin_addr.s_addr = master_ip;
 	dest.sin_port = htons(port);
 
-	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	bool own_socket = (use_socket == INVALID_SOCKET);
+	SOCKET sock = own_socket ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : use_socket;
 	if (sock == INVALID_SOCKET) return false;
-
-	int reuse = 1;
-	setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
-	struct sockaddr_in local;
-	memset(&local, 0, sizeof(local));
-	local.sin_family = AF_INET;
-	local.sin_addr.s_addr = INADDR_ANY;
-	local.sin_port = htons(info ? 27015 : 0);
-	bind(sock, (struct sockaddr *)&local, sizeof(local));
 
 	static const uint8_t challenge_req[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x71 };
 	sendto(sock, (const char *)challenge_req, sizeof(challenge_req), 0,
@@ -303,7 +295,7 @@ bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info
 
 	if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
 	{
-		CLOSE_SOCKET(sock);
+		if (own_socket) CLOSE_SOCKET(sock);
 		return false;
 	}
 
@@ -311,7 +303,7 @@ bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info
 	int resp_len = recvfrom(sock, (char *)resp, sizeof(resp), 0, NULL, NULL);
 	if (resp_len < 10 || resp[4] != 0x73)
 	{
-		CLOSE_SOCKET(sock);
+		if (own_socket) CLOSE_SOCKET(sock);
 		return false;
 	}
 
@@ -346,6 +338,6 @@ bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info
 		hostname, port, challenge, map,
 		info ? info->players : 0, info ? info->max_players : 16, stype);
 
-	CLOSE_SOCKET(sock);
+	if (own_socket) CLOSE_SOCKET(sock);
 	return true;
 }

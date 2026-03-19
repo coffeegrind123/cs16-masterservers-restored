@@ -21,6 +21,7 @@ static bool g_logCSInit = false;
 static char g_selfDir[512] = {0};
 static char g_pendingSetmaster[256] = {0};
 static void *g_pServerState = NULL;
+static SOCKET *g_pServerSocket = NULL;
 static char *g_pMapName = NULL;
 static int *g_pMaxPlayers = NULL;
 static uint8_t *g_pClientArray = NULL;
@@ -233,7 +234,8 @@ static void Cmd_SetMaster(void)
 		g_lastHeartbeat = 0;
 		heartbeat_info_t hbinfo;
 		GatherHeartbeatInfo(&hbinfo);
-		if (master_send_heartbeat(full_addr, &hbinfo))
+		SOCKET svSock = (g_pServerSocket && !IsBadReadPtr(g_pServerSocket, 4)) ? *g_pServerSocket : INVALID_SOCKET;
+		if (master_send_heartbeat(full_addr, &hbinfo, svSock))
 		{
 			g_pConPrintf("Server registered with master %s\n", full_addr);
 			g_lastHeartbeat = GetTickCount();
@@ -484,6 +486,38 @@ static void InitEngineHook()
 		}
 	}
 
+	const char *netNeedle = "NET_SendPacket: bad address type";
+	uint8_t *netStr = FindPattern(base, imageSize, (const uint8_t *)netNeedle, strlen(netNeedle));
+	if (netStr)
+	{
+		uint8_t netPush[5] = { 0x68 };
+		memcpy(netPush + 1, &netStr, 4);
+		uint8_t *netRef = FindPattern(base, imageSize, netPush, 5);
+		if (netRef)
+		{
+			uint8_t *fn = netRef;
+			while (fn > base && !(fn[0] == 0x55 && fn[1] == 0x8B && fn[2] == 0xEC))
+			{
+				if (fn[0] == 0xCC && fn[1] != 0xCC) { fn++; break; }
+				fn--;
+			}
+			for (uint8_t *p = fn; p < netRef; p++)
+			{
+				if (p[0] == 0x8B && p[1] == 0x34 && (p[2] == 0xBD || p[2] == 0x85))
+				{
+					SOCKET *sockArray = *(SOCKET **)(p + 3);
+					if (!IsBadReadPtr(sockArray, 8))
+					{
+						g_pServerSocket = &sockArray[1];
+						RealMasterLog("Engine hook: ip_sockets at %p, server socket ptr at %p",
+							sockArray, g_pServerSocket);
+						break;
+					}
+				}
+			}
+		}
+	}
+
 	struct cmd_node_t { cmd_node_t *next; const char *name; void (*handler)(); int flags; };
 
 	void **ppCmdHead = NULL;
@@ -662,7 +696,8 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 				g_lastHeartbeat = now;
 				heartbeat_info_t hbinfo;
 				GatherHeartbeatInfo(&hbinfo);
-				master_send_heartbeat(g_heartbeatMaster, &hbinfo);
+				SOCKET svSock = (g_pServerSocket && !IsBadReadPtr(g_pServerSocket, 4)) ? *g_pServerSocket : INVALID_SOCKET;
+				master_send_heartbeat(g_heartbeatMaster, &hbinfo, svSock);
 			}
 		}
 		else

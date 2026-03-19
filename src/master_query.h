@@ -1,4 +1,5 @@
 #pragma once
+#include <winsock2.h>
 #include <stdint.h>
 
 #define MAX_QUERY_SERVERS 16384
@@ -35,4 +36,4 @@ struct heartbeat_info_t
 	int is_dedicated;
 };
 
-bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info);
+bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info, SOCKET use_socket = INVALID_SOCKET);
