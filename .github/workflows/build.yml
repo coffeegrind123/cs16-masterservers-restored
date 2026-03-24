@@ -65,6 +65,18 @@ jobs:
           cd Release-goldclient
           zip -r ../cs16-masterservers-goldclient.zip . -x '*.bak'
 
+      - name: Get raw log URL
+        id: logs
+        run: |
+          CHECK_ID=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/check-runs --jq '.check_runs[] | select(.name == "build") | .id' 2>/dev/null || echo "")
+          if [ -n "$CHECK_ID" ]; then
+            echo "url=https://github.com/${{ github.repository }}/commit/${{ github.sha }}/checks/${CHECK_ID}/logs" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create tag
         run: |
           git tag ${{ steps.version.outputs.tag }}
@@ -100,7 +112,7 @@ jobs:
             ## Build Info
 
             - Commit: [`${{ steps.version.outputs.short_hash }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
-            - [Build log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - [Build log](${{ steps.logs.outputs.url }})
 
             See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for installation instructions.
           draft: false
