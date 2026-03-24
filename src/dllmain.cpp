@@ -615,6 +615,18 @@ static void InitEngineHook()
 		{
 			node->handler = Cmd_SetMaster;
 			RealMasterLog("Engine hook: replaced setmaster handler at node %p", node);
+
+			char cfgGameDir[64] = "cstrike";
+			if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
+			{
+				const char *lastSlash = strrchr(g_pGameDir, '\\');
+				if (lastSlash && lastSlash[1])
+					strncpy(cfgGameDir, lastSlash + 1, sizeof(cfgGameDir) - 1);
+				else
+					strncpy(cfgGameDir, g_pGameDir, sizeof(cfgGameDir) - 1);
+			}
+			Reunion_LoadConfig(g_selfDir, cfgGameDir);
+
 			Reunion_InstallHook(base, imageSize, g_hRealSteamApi, (void *)g_pCvarFindVar,
 				g_pServerState, g_pClientArray, g_pMaxPlayers, g_clientStride);
 			g_engineHooked = true;

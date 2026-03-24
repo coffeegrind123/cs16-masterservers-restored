@@ -1,9 +1,209 @@
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include "reunion.h"
+#include "reunion_auth.h"
 
 extern void RealMasterLog(const char *fmt, ...);
+
+reunion_config_t g_reunionConfig;
+
+static void InitConfigDefaults()
+{
+	memset(&g_reunionConfig, 0, sizeof(g_reunionConfig));
+	g_reunionConfig.AuthVersion = 4;
+	g_reunionConfig.SC2009_RevCompatMode = 1;
+	g_reunionConfig.EnableSXEIdGeneration = 0;
+	g_reunionConfig.EnableGenPrefix2 = 0;
+	g_reunionConfig.IDClientsLimit = 1;
+	g_reunionConfig.LoggingMode = 3;
+	strncpy(g_reunionConfig.HLTVExcept_IP, "127.0.0.1", sizeof(g_reunionConfig.HLTVExcept_IP) - 1);
+
+	g_reunionConfig.cid_RealSteam = 1;
+	g_reunionConfig.cid_PendingSteam = 5;
+	g_reunionConfig.cid_HLTV = 5;
+	g_reunionConfig.cid_NoSteam47 = 5;
+	g_reunionConfig.cid_NoSteam48 = 5;
+	g_reunionConfig.cid_RevEmu = 1;
+	g_reunionConfig.cid_SETTi = 3;
+	g_reunionConfig.cid_StmEmu = 1;
+	g_reunionConfig.cid_AVSMP = 1;
+	g_reunionConfig.cid_SxEI = 1;
+
+	g_reunionConfig.ServerInfoAnswerType = 0;
+	g_reunionConfig.FixBuggedQuery = 1;
+	g_reunionConfig.EnableQueryLimiter = 1;
+	g_reunionConfig.QueryFloodBanLevel = 400;
+	g_reunionConfig.QueryFloodBanTime = 10;
+	g_reunionConfig.AllowSplitPackets = 0;
+}
+
+static int ParseIntClamped(const char *val, int min, int max, int def)
+{
+	int v = atoi(val);
+	if (v < min || v > max) return def;
+	return v;
+}
+
+static void ParseConfigLine(const char *key, const char *val)
+{
+	if (stricmp(key, "AuthVersion") == 0)
+		g_reunionConfig.AuthVersion = ParseIntClamped(val, 1, 4, 4);
+	else if (stricmp(key, "SteamIdHashSalt") == 0)
+		strncpy(g_reunionConfig.SteamIdHashSalt, val, sizeof(g_reunionConfig.SteamIdHashSalt) - 1);
+	else if (stricmp(key, "SC2009_RevCompatMode") == 0)
+		g_reunionConfig.SC2009_RevCompatMode = ParseIntClamped(val, 0, 1, 1);
+	else if (stricmp(key, "EnableSXEIdGeneration") == 0)
+		g_reunionConfig.EnableSXEIdGeneration = ParseIntClamped(val, 0, 1, 0);
+	else if (stricmp(key, "EnableGenPrefix2") == 0)
+		g_reunionConfig.EnableGenPrefix2 = ParseIntClamped(val, 0, 1, 0);
+	else if (stricmp(key, "IDClientsLimit") == 0)
+		g_reunionConfig.IDClientsLimit = ParseIntClamped(val, 0, 32, 1);
+	else if (stricmp(key, "LoggingMode") == 0)
+		g_reunionConfig.LoggingMode = ParseIntClamped(val, 0, 3, 0);
+	else if (stricmp(key, "HLTVExcept_IP") == 0)
+		strncpy(g_reunionConfig.HLTVExcept_IP, val, sizeof(g_reunionConfig.HLTVExcept_IP) - 1);
+	else if (stricmp(key, "cid_Steam") == 0 || stricmp(key, "cid_RealSteam") == 0)
+		g_reunionConfig.cid_RealSteam = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_SteamPending") == 0 || stricmp(key, "cid_PendingSteam") == 0)
+		g_reunionConfig.cid_PendingSteam = ParseIntClamped(val, 0, 12, 3);
+	else if (stricmp(key, "cid_HLTV") == 0)
+		g_reunionConfig.cid_HLTV = ParseIntClamped(val, 0, 12, 7);
+	else if (stricmp(key, "cid_NoSteam47") == 0)
+		g_reunionConfig.cid_NoSteam47 = ParseIntClamped(val, 0, 12, 3);
+	else if (stricmp(key, "cid_NoSteam48") == 0)
+		g_reunionConfig.cid_NoSteam48 = ParseIntClamped(val, 0, 12, 3);
+	else if (stricmp(key, "cid_RevEmu") == 0)
+		g_reunionConfig.cid_RevEmu = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_RevEmu2013") == 0)
+		g_reunionConfig.cid_RevEmu = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_SC2009") == 0)
+		g_reunionConfig.cid_RevEmu = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_OldRevEmu") == 0)
+		g_reunionConfig.cid_RevEmu = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_Setti") == 0 || stricmp(key, "cid_SETTi") == 0)
+		g_reunionConfig.cid_SETTi = ParseIntClamped(val, 0, 12, 3);
+	else if (stricmp(key, "cid_SteamEmu") == 0 || stricmp(key, "cid_StmEmu") == 0)
+		g_reunionConfig.cid_StmEmu = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_AVSMP") == 0)
+		g_reunionConfig.cid_AVSMP = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "cid_SXEI") == 0 || stricmp(key, "cid_SxEI") == 0)
+		g_reunionConfig.cid_SxEI = ParseIntClamped(val, 0, 12, 1);
+	else if (stricmp(key, "IPGen_Prefix1") == 0)
+		g_reunionConfig.IPGen_Prefix1 = atoi(val);
+	else if (stricmp(key, "IPGen_Prefix2") == 0)
+		g_reunionConfig.IPGen_Prefix2 = atoi(val);
+	else if (stricmp(key, "Native_Prefix1") == 0)
+		g_reunionConfig.Native_Prefix1 = atoi(val);
+	else if (stricmp(key, "RevEmu_Prefix1") == 0)
+		g_reunionConfig.RevEmu_Prefix1 = atoi(val);
+	else if (stricmp(key, "SC2009_Prefix1") == 0)
+		g_reunionConfig.SC2009_Prefix1 = atoi(val);
+	else if (stricmp(key, "RevEmu2013_Prefix1") == 0)
+		g_reunionConfig.RevEmu2013_Prefix1 = atoi(val);
+	else if (stricmp(key, "SteamEmu_Prefix1") == 0)
+		g_reunionConfig.SteamEmu_Prefix1 = atoi(val);
+	else if (stricmp(key, "OldRevEmu_Prefix1") == 0)
+		g_reunionConfig.OldRevEmu_Prefix1 = atoi(val);
+	else if (stricmp(key, "Setti_Prefix1") == 0)
+		g_reunionConfig.Setti_Prefix1 = atoi(val);
+	else if (stricmp(key, "AVSMP_Prefix1") == 0)
+		g_reunionConfig.AVSMP_Prefix1 = atoi(val);
+	else if (stricmp(key, "SXEI_Prefix1") == 0)
+		g_reunionConfig.SXEI_Prefix1 = atoi(val);
+	else if (stricmp(key, "ServerInfoAnswerType") == 0)
+		g_reunionConfig.ServerInfoAnswerType = ParseIntClamped(val, 0, 2, 0);
+	else if (stricmp(key, "FixBuggedQuery") == 0)
+		g_reunionConfig.FixBuggedQuery = ParseIntClamped(val, 0, 1, 1);
+	else if (stricmp(key, "EnableQueryLimiter") == 0)
+		g_reunionConfig.EnableQueryLimiter = ParseIntClamped(val, 0, 1, 1);
+	else if (stricmp(key, "QueryFloodBanLevel") == 0)
+		g_reunionConfig.QueryFloodBanLevel = ParseIntClamped(val, 0, 8192, 400);
+	else if (stricmp(key, "QueryFloodBanTime") == 0)
+		g_reunionConfig.QueryFloodBanTime = ParseIntClamped(val, 0, 60, 10);
+	else if (stricmp(key, "AllowSplitPackets") == 0)
+		g_reunionConfig.AllowSplitPackets = ParseIntClamped(val, 0, 1, 0);
+}
+
+static bool ParseConfigFile(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	if (!f) return false;
+
+	RealMasterLog("Reunion: loading config from %s", path);
+
+	char line[512];
+	if (fgets(line, sizeof(line), f))
+	{
+		if ((uint8_t)line[0] == 0xEF && (uint8_t)line[1] == 0xBB && (uint8_t)line[2] == 0xBF)
+			memmove(line, line + 3, strlen(line + 3) + 1);
+		fseek(f, 0, SEEK_SET);
+	}
+
+	while (fgets(line, sizeof(line), f))
+	{
+		char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		if (*p == '#' || *p == ';' || *p == '/' || *p == '\\' || *p == '\0' || *p == '\r' || *p == '\n')
+			continue;
+		if (*p == '[') continue;
+
+		char *eq = strchr(p, '=');
+		if (!eq) continue;
+
+		*eq = '\0';
+		char *key = p;
+		char *val = eq + 1;
+
+		while (*key && (key[strlen(key) - 1] == ' ' || key[strlen(key) - 1] == '\t'))
+			key[strlen(key) - 1] = '\0';
+		while (*val == ' ' || *val == '\t') val++;
+
+		char *end = val + strlen(val) - 1;
+		while (end > val && (*end == '\r' || *end == '\n' || *end == ' ' || *end == '\t'))
+			*end-- = '\0';
+
+		char *comment = strstr(val, "//");
+		if (comment) { *comment = '\0'; end = comment - 1; while (end > val && *end == ' ') *end-- = '\0'; }
+		comment = strchr(val, '#');
+		if (comment) { *comment = '\0'; end = comment - 1; while (end > val && *end == ' ') *end-- = '\0'; }
+
+		if (*key && *val)
+			ParseConfigLine(key, val);
+	}
+
+	fclose(f);
+	return true;
+}
+
+void Reunion_LoadConfig(const char *halfLifeDir, const char *gameDir)
+{
+	InitConfigDefaults();
+
+	char path[512];
+	snprintf(path, sizeof(path), "%s\\%s\\reunion.cfg", halfLifeDir, gameDir);
+	if (ParseConfigFile(path)) goto loaded;
+
+	snprintf(path, sizeof(path), "%s\\platform\\config\\reunion.cfg", halfLifeDir);
+	if (ParseConfigFile(path)) goto loaded;
+
+	snprintf(path, sizeof(path), "%s\\reunion.cfg", halfLifeDir);
+	if (ParseConfigFile(path)) goto loaded;
+
+	RealMasterLog("Reunion: no reunion.cfg found, using defaults");
+	return;
+
+loaded:
+	if (g_reunionConfig.HLTVExcept_IP[0])
+		g_reunionConfig.hltvExceptIPAddr = inet_addr(g_reunionConfig.HLTVExcept_IP);
+
+	RealMasterLog("Reunion: config: AuthVersion=%d LoggingMode=%d IDClientsLimit=%d",
+		g_reunionConfig.AuthVersion, g_reunionConfig.LoggingMode, g_reunionConfig.IDClientsLimit);
+	if (g_reunionConfig.SteamIdHashSalt[0])
+		RealMasterLog("Reunion: config: SteamIdHashSalt is set (%d chars)", (int)strlen(g_reunionConfig.SteamIdHashSalt));
+}
 
 static uint8_t *FindPattern(uint8_t *start, size_t len, const uint8_t *pattern, size_t patLen)
 {
@@ -73,17 +273,76 @@ static void *GetGameServerInterface()
 
 static int __cdecl Reunion_ValidateClient(int client, void *cert, int certLen)
 {
-	RealMasterLog("Reunion: ValidateClient called (client=%p, certLen=%d)", (void *)client, certLen);
+	if (g_reunionConfig.LoggingMode > 0)
+		RealMasterLog("Reunion: ValidateClient called (client=%p, certLen=%d)", (void *)client, certLen);
+
+	SteamAuthValidate_t pfnTrampoline = (SteamAuthValidate_t)g_pTrampoline;
+	int result = pfnTrampoline(client, cert, certLen);
+
+	if (result != 0)
+	{
+		RealMasterLog("Reunion: Steam validation OK for client %p", (void *)client);
+		return result;
+	}
+
+	authdata_t authdata;
+	memset(&authdata, 0, sizeof(authdata));
+	authdata.authTicket = (uint8_t *)cert;
+	authdata.ticketLen = certLen;
+	authdata.protocol = 48;
+	if (client)
+	{
+		uint8_t *cl = (uint8_t *)client;
+		if (!IsBadReadPtr(cl + 0x28, 4))
+			authdata.ipaddr = *(uint32_t *)(cl + 0x28);
+		if (!IsBadReadPtr(cl + 0x3598, 4))
+			authdata.userinfo = (char *)(cl + 0x3598);
+	}
+
+	if (client)
+	{
+		uint8_t *cl = (uint8_t *)client;
+		RealMasterLog("Reunion: client+0x20: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+			cl[0x20], cl[0x21], cl[0x22], cl[0x23], cl[0x24], cl[0x25], cl[0x26], cl[0x27],
+			cl[0x28], cl[0x29], cl[0x2A], cl[0x2B], cl[0x2C], cl[0x2D], cl[0x2E], cl[0x2F],
+			cl[0x30], cl[0x31], cl[0x32], cl[0x33]);
+
+		uint8_t *ticket = (uint8_t *)cert;
+		if (certLen >= 16)
+			RealMasterLog("Reunion: ticket[0..15]: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+				ticket[0], ticket[1], ticket[2], ticket[3], ticket[4], ticket[5], ticket[6], ticket[7],
+				ticket[8], ticket[9], ticket[10], ticket[11], ticket[12], ticket[13], ticket[14], ticket[15]);
+	}
+
+	RealMasterLog("Reunion: authdata ip=0x%08X, ticketLen=%d, userinfo=%s",
+		authdata.ipaddr, authdata.ticketLen,
+		authdata.userinfo ? "(set)" : "(null)");
+
+	client_auth_kind authkind = Reunion_Authorize_Client(&authdata);
+	if (authkind == CA_UNKNOWN)
+		authkind = CA_NO_STEAM_48;
+
+	uint32_t steamId = Reunion_ProcessAuth(&authdata, authkind);
+	RealMasterLog("Reunion: ProcessAuth returned steamId=%u (0x%08X)", steamId, steamId);
+	if (steamId == 0)
+		return 0;
 
 	if (g_pfnHltvUnauth)
 	{
 		int unauthResult = g_pfnHltvUnauth(client);
-		uint32_t idLow = *(uint32_t *)((uint8_t *)client + g_steamIdLowOffset);
-		uint32_t idHigh = *(uint32_t *)((uint8_t *)client + g_steamIdHighOffset);
-		RealMasterLog("Reunion: CreateUnauthenticatedUserConnection result=%d, steamId=%08X:%08X",
-			unauthResult, idHigh, idLow);
-		if (unauthResult)
+		if (unauthResult && g_authTypeOffset > 0 && g_steamIdLowOffset > 0)
+		{
+			*(int *)((uint8_t *)client + g_authTypeOffset) = 1;
+			*(uint32_t *)((uint8_t *)client + g_steamIdLowOffset) = steamId;
+			*(uint32_t *)((uint8_t *)client + g_steamIdHighOffset) = 0;
+
+			uint32_t verifyLow = *(uint32_t *)((uint8_t *)client + g_steamIdLowOffset);
+			uint32_t verifyHigh = *(uint32_t *)((uint8_t *)client + g_steamIdHighOffset);
+			int verifyAuth = *(int *)((uint8_t *)client + g_authTypeOffset);
+			RealMasterLog("Reunion: client accepted STEAM_0:%d:%d (verify: auth=%d id=%08X:%08X)",
+				steamId & 1, steamId >> 1, verifyAuth, verifyHigh, verifyLow);
 			return 1;
+		}
 	}
 
 	return 0;

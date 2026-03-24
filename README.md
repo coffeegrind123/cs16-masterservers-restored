@@ -27,6 +27,7 @@ Features:
 - Sliding window A2S queries (128 concurrent, handles 3000+ server lists)
 - Enhanced `setmaster` console command with validation and VDF config writing
 - Heartbeat support for listen servers (register your server with any master)
+- ReUnion-compatible non-Steam client support (RevEmu, SteamEmu, OldRevEmu, Xash3D, etc.)
 - Engine integration via runtime pattern scanning — no engine files modified
 - One universal `mastersrv.dll` works with both pre-anniversary and anniversary builds
 
@@ -41,7 +42,8 @@ Half-Life/
 ├── mastersrv.dll                      <- new
 └── platform/
     ├── config/
-    │   └── MasterServers.vdf          <- new
+    │   ├── MasterServers.vdf          <- new
+    │   └── reunion.cfg                <- new (non-Steam client config)
     └── servers/
         └── ServerBrowser.dll          <- replace
 ```
@@ -81,6 +83,25 @@ Edit `platform/config/MasterServers.vdf` to configure master servers:
 ```
 
 Masters are tried top-down — the first one that responds is used. If none respond, the local server cache is used as fallback. If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
+
+### reunion.cfg
+
+Controls non-Steam client authentication. Uses the same format and options as [ReUnion](https://github.com/rehlds/ReUnion). The default config shipped with the release accepts all common non-Steam emulator types.
+
+Key options:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `AuthVersion` | 4 | Auth protocol version (1-4, higher = newer) |
+| `SteamIdHashSalt` | (empty) | Salt for SteamID hashing (16+ chars for AuthVersion >= 3) |
+| `cid_RevEmu` | 1 | RevEmu clients: 1=accept, 5=reject |
+| `cid_NoSteam48` | 5 | Unknown protocol 48: 1=accept, 3=IP-based ID, 5=reject |
+| `LoggingMode` | 3 | 0=none, 1=console, 2=logfile, 3=both |
+
+Config search order:
+1. `cstrike/reunion.cfg`
+2. `platform/config/reunion.cfg`
+3. `reunion.cfg` (Half-Life root)
 
 ### setmaster Console Command
 
@@ -130,6 +151,29 @@ The engine's built-in `heartbeat` console command can be used to send an extra h
 
 You can also put `setmaster <ip:port>` in `config.cfg` or use `+setmaster <ip:port>` in launch options for automatic registration on every start.
 
+## Non-Steam Client Support
+
+mastersrv.dll includes [ReUnion](https://github.com/rehlds/ReUnion)-compatible authentication for non-Steam clients on listen servers. Non-Steam players can join your server without being rejected by Steam validation.
+
+Supported emulator types:
+- RevEmu (all variants including 2013, Xash3D)
+- SteamClient 2009
+- SteamEmu
+- OldRevEmu
+- AVSMP
+- sXe Injected
+- NoSteam protocol 47/48
+
+Each non-Steam client gets a unique persistent SteamID derived from their emulator ticket data (HDD serial hash, volume ID, etc.). Steam clients are unaffected and keep their real SteamIDs.
+
+Runtime patches applied to hw.dll (no files modified on disk):
+- Steam validation function detour via trampoline
+- `CreateUnauthenticatedUserConnection` for bot Steam sessions
+- Auth callback flag patches to prevent async Steam kicks
+- Certificate length check bypass for non-Steam tickets
+
+Configure via `reunion.cfg` — uses the same format as the [ReUnion plugin](https://github.com/rehlds/ReUnion).
+
 ## Building from Source
 
 Requires MinGW cross-compiler (i686-w64-mingw32-g++), Python 3, and a Steam account that owns CS 1.6.
@@ -169,7 +213,8 @@ mastersrv.dll (proxy DLL)
     ├── A2S_INFO: Sliding window (128 concurrent, 2s per-server timeout)
     ├── Caches: platform/cache/servers.dat
     ├── Engine hook: pattern scans hw.dll for console commands, cvars, server state
-    └── Heartbeat: challenge-response via engine's server socket (port 27015)
+    ├── Heartbeat: challenge-response via engine's server socket (port 27015)
+    └── Reunion: non-Steam auth via emulator detection + CreateUnauthenticatedUserConnection
 ```
 
 ### Proxy DLL Exports
@@ -198,12 +243,15 @@ mastersrv.dll hooks into the engine without modifying any files. During the firs
 | `Cmd_AddCommand` | String `"Cmd_AddCommand: %s already defined as a var"` → xref → function start |
 | `Cmd_Argc` / `Cmd_Argv` / `Con_Printf` | From original `setmaster` handler's call targets |
 | `Cvar_FindVar` | String `"Cvar_RegisterVariable: %s is a command"` → first CALL in that function |
-| Server state pointer | `MOV ECX, [addr]` in setmaster handler |
+| Server state pointer | `MOV ECX, [addr]` or `CMP [addr], 0` in setmaster handler |
 | Map name buffer | String `"map     :  %s at"` → PUSH before it |
-| Maxplayers pointer | String `"players :  %i active (%i max)"` → MOV before it |
+| Maxplayers pointer | String `"players :  %i active (%i max)"` → MOV/PUSH before it |
 | Client array base | `maxplayers_addr - 4` |
-| `ip_sockets[]` array | String `"NET_SendPacket: bad address type"` → `MOV ESI,[EDI*4+base]` in that function |
+| Client stride | `ADD reg, imm32` in player iteration loop |
+| `ip_sockets[]` array | String `"NET_SendPacket: bad address type"` → `MOV ESI,[reg*4+base]` in that function |
 | Command linked list head | `MOV reg, [addr]` in `Cmd_AddCommand` body |
+| Steam validation function | String `"STEAM validation rejected"` → preceding CALL target |
+| Auth callback handler | Byte pattern `8A 81 86 00 00 00 84 C0` (flag check in callback) |
 
 ### Protocols
 
