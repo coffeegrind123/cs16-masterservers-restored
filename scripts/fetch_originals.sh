@@ -10,7 +10,7 @@ fetch_serverbrowser() {
     local tmpdir=$(mktemp -d)
 
     DepotDownloader \
-        -app 10 $branch_flag -os windows \
+        -app 70 -depot 2 $branch_flag -os windows \
         -filelist "$ROOT/steam_filelist.txt" \
         -dir "$tmpdir" \
         -username "$STEAM_USERNAME" -password "$STEAM_PASSWORD"
