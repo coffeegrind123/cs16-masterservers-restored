@@ -1,3 +1,4 @@
+[![Build and Release](https://github.com/coffeegrind123/cs16-masterservers-restored/actions/workflows/build.yml/badge.svg)](https://github.com/coffeegrind123/cs16-masterservers-restored/actions/workflows/build.yml)
 # CS 1.6 Master Servers Restored
 
 Restores custom master server support for Counter-Strike 1.6, allowing server browsers to query independent master servers instead of Valve's deprecated infrastructure.
