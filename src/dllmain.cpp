@@ -8,6 +8,7 @@
 #include "master_query.h"
 #include "vdf_parser.h"
 #include "utils.h"
+#include "reunion.h"
 
 static HMODULE g_hSelf = NULL;
 static HMODULE g_hRealSteamApi = NULL;
@@ -614,6 +615,8 @@ static void InitEngineHook()
 		{
 			node->handler = Cmd_SetMaster;
 			RealMasterLog("Engine hook: replaced setmaster handler at node %p", node);
+			Reunion_InstallHook(base, imageSize, g_hRealSteamApi, (void *)g_pCvarFindVar,
+				g_pServerState, g_pClientArray, g_pMaxPlayers, g_clientStride);
 			g_engineHooked = true;
 			return;
 		}
@@ -696,6 +699,7 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 	LOAD_REAL_FUNC(SteamAPI_RunCallbacks)
 	if (pfn_SteamAPI_RunCallbacks) pfn_SteamAPI_RunCallbacks();
 
+	Reunion_PostConnect();
 	InitEngineHook();
 
 	static bool g_pendingSetmasterDone = false;

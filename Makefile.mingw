@@ -8,7 +8,8 @@ SOURCES = src/dllmain.cpp \
 	src/a2s_query.cpp \
 	src/vdf_parser.cpp \
 	src/server_cache.cpp \
-	src/utils.cpp
+	src/utils.cpp \
+	src/reunion.cpp
 
 INCLUDE = -Isrc
 
