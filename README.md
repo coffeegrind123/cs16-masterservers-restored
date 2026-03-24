@@ -161,7 +161,7 @@ All heartbeat fields are resolved from the engine at runtime:
 
 mastersrv.dll embeds a lightweight HTTP file server that serves game files (maps, models, resources) to clients. This enables non-Steam clients (Xash3D, browser-based) that lack UDP file transfer to download missing content.
 
-- **Port**: TCP 27015 by default (same port as game's UDP — one port forwarding rule covers both)
+- **Port**: TCP 27015 by default
 - **Auto-start**: Starts when the server starts, stops when the server stops
 - **sv_downloadurl**: Automatically set to `http://<public_ip>:27015`
 - **File search**: Serves from `cstrike/`, `cstrike_downloads/`, and `valve/` directories

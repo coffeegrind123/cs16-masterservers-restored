@@ -324,12 +324,11 @@ static void HandleClient(SOCKET client)
 
 	RealMasterLog("FastDL: %s %s (UA: %.30s, HTTP/1.1=%d)", method, path, userAgent, isHttp11);
 
-	// TODO: re-enable user agent restriction
-	// if (!isHttp11 || strncmp(userAgent, "Half-Life", 9) != 0)
-	// {
-	// 	closesocket(client);
-	// 	return;
-	// }
+	if (!isHttp11 || strncmp(userAgent, "Half-Life", 9) != 0)
+	{
+		closesocket(client);
+		return;
+	}
 
 	if (stricmp(method, "GET") != 0)
 	{
