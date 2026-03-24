@@ -183,6 +183,29 @@ static void GatherHeartbeatInfo(heartbeat_info_t *info)
 		info->protocol, info->is_dedicated ? 'd' : 'l');
 }
 
+static void Cmd_FastdlPort(void)
+{
+	if (!g_pCmdArgc || !g_pCmdArgv || !g_pConPrintf) return;
+
+	int argc = g_pCmdArgc();
+	if (argc < 2)
+	{
+		g_pConPrintf("fastdl_port is %d\n", g_fastdlPort);
+		return;
+	}
+
+	int port = atoi(g_pCmdArgv(1));
+	if (port > 0 && port < 65536)
+	{
+		g_fastdlPort = port;
+		g_pConPrintf("FastDL port set to %d (takes effect on next server start)\n", g_fastdlPort);
+	}
+	else
+	{
+		g_pConPrintf("Invalid port. Usage: fastdl_port <port>\n");
+	}
+}
+
 static void Cmd_SetMaster(void)
 {
 	if (!g_pCmdArgc || !g_pCmdArgv || !g_pConPrintf) return;
@@ -618,6 +641,14 @@ static void InitEngineHook()
 			node->handler = Cmd_SetMaster;
 			RealMasterLog("Engine hook: replaced setmaster handler at node %p", node);
 
+			static cmd_node_t fastdlNode;
+			fastdlNode.name = (char *)"fastdl_port";
+			fastdlNode.handler = Cmd_FastdlPort;
+			fastdlNode.flags = 0;
+			fastdlNode.next = node->next;
+			node->next = &fastdlNode;
+			RealMasterLog("Engine hook: registered fastdl_port command");
+
 			char cfgGameDir[64] = "cstrike";
 			if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
 			{
@@ -631,6 +662,24 @@ static void InitEngineHook()
 
 			Reunion_InstallHook(base, imageSize, g_hRealSteamApi, (void *)g_pCvarFindVar,
 				g_pServerState, g_pClientArray, g_pMaxPlayers, g_clientStride);
+
+			const char *ipPrintStr = "Server IP address %s\n";
+			uint8_t *ipStr = FindPattern(base, imageSize, (const uint8_t *)ipPrintStr, strlen(ipPrintStr));
+			if (ipStr)
+			{
+				uint8_t ipPush[5] = { 0x68 };
+				memcpy(ipPush + 1, &ipStr, 4);
+				uint8_t *ipPushRef = FindPattern(base, imageSize, ipPush, 5);
+				if (ipPushRef && ipPushRef[-1] == 0x50 && ipPushRef[5] == 0xE8)
+				{
+					DWORD op;
+					VirtualProtect(ipPushRef - 1, 14, PAGE_EXECUTE_READWRITE, &op);
+					memset(ipPushRef - 1, 0x90, 14);
+					VirtualProtect(ipPushRef - 1, 14, op, &op);
+					RealMasterLog("Engine hook: NOPed Server IP address print");
+				}
+			}
+
 			g_engineHooked = true;
 			return;
 		}
@@ -750,6 +799,41 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 		}
 	}
 
+	if (g_engineHooked && g_pServerState && *(int *)g_pServerState != 0 && !g_heartbeatActive && !g_heartbeatMaster[0])
+	{
+		char vdf_path[512];
+		snprintf(vdf_path, sizeof(vdf_path), "%s\\platform\\config\\MasterServers.vdf", g_selfDir);
+		master_list_t masters;
+		if (vdf_parse_master_servers(vdf_path, &masters) && masters.count > 0)
+		{
+			strncpy(g_heartbeatMaster, masters.entries[0].addr, sizeof(g_heartbeatMaster) - 1);
+			g_heartbeatActive = true;
+			g_lastHeartbeat = 0;
+			RealMasterLog("Auto-loaded master %s from MasterServers.vdf, heartbeats active", g_heartbeatMaster);
+
+			if (g_pCvarFindVar)
+			{
+				cvar_t *svlan = g_pCvarFindVar("sv_lan");
+				if (svlan && svlan->value != 0.0f)
+				{
+					svlan->value = 0.0f;
+					svlan->string = (char *)"0";
+					RealMasterLog("Auto-set sv_lan 0 (master server configured)");
+				}
+			}
+
+			heartbeat_info_t hbinfo;
+			GatherHeartbeatInfo(&hbinfo);
+			SOCKET svSock = (g_pServerSocket && !IsBadReadPtr(g_pServerSocket, 4)) ? *g_pServerSocket : INVALID_SOCKET;
+			if (master_send_heartbeat(g_heartbeatMaster, &hbinfo, svSock))
+			{
+				g_lastHeartbeat = GetTickCount();
+				if (g_pConPrintf)
+					g_pConPrintf("Server registered with master %s\n", g_heartbeatMaster);
+			}
+		}
+	}
+
 	static bool g_fastdlStarted = false;
 	if (g_engineHooked && g_pServerState && *(int *)g_pServerState != 0 && !g_fastdlStarted)
 	{
@@ -758,11 +842,15 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 		if (g_pCvarFindVar)
 		{
 			cvar_t *cvUrl = g_pCvarFindVar("sv_downloadurl");
-			if (cvUrl && cvUrl->string && cvUrl->string[0])
+			bool skipFastdl = false;
+			if (cvUrl && cvUrl->string && cvUrl->string[0]
+				&& !strstr(cvUrl->string, "localhost") && !strstr(cvUrl->string, "0.0.0.0")
+				&& !strstr(cvUrl->string, "127.0.0.1"))
 			{
 				RealMasterLog("FastDL: sv_downloadurl already set to '%s', skipping", cvUrl->string);
+				skipFastdl = true;
 			}
-			else
+			if (!skipFastdl)
 			{
 				char cfgGameDir[64] = "cstrike";
 				if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
@@ -782,6 +870,51 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 					strncpy(publicIP, fallback[0] ? fallback : "0.0.0.0", sizeof(publicIP) - 1);
 					RealMasterLog("FastDL: using fallback IP: %s", publicIP);
 				}
+
+				uint32_t pubIP = inet_addr(publicIP);
+				if (pubIP != INADDR_NONE && pubIP != 0)
+				{
+					HMODULE hHw = GetModuleHandleA("hw.dll");
+					if (hHw)
+					{
+						IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)hHw;
+						IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((uint8_t *)hHw + dos->e_lfanew);
+						uint8_t *hwBase = (uint8_t *)hHw;
+						size_t hwSize = nt->OptionalHeader.SizeOfImage;
+
+						const char *ipStr = "Server IP address %s\n";
+						uint8_t *strAddr = FindPattern(hwBase, hwSize, (const uint8_t *)ipStr, strlen(ipStr));
+						if (strAddr)
+						{
+							uint8_t pushPat[5] = { 0x68 };
+							memcpy(pushPat + 1, &strAddr, 4);
+							uint8_t *pushRef = FindPattern(hwBase, hwSize, pushPat, 5);
+							if (pushRef)
+							{
+								for (uint8_t *p = pushRef - 32; p < pushRef; p++)
+								{
+									if (p[0] == 0xBE)
+									{
+										uint8_t *netadr = *(uint8_t **)(p + 1);
+										if (netadr >= hwBase && netadr < hwBase + hwSize)
+										{
+											DWORD oldProt;
+											VirtualProtect(netadr + 4, 4, PAGE_EXECUTE_READWRITE, &oldProt);
+											memcpy(netadr + 4, &pubIP, 4);
+											VirtualProtect(netadr + 4, 4, oldProt, &oldProt);
+											RealMasterLog("FastDL: patched server IP to %s", publicIP);
+										}
+
+										break;
+									}
+								}
+							}
+						}
+					}
+				}
+
+				if (g_pConPrintf)
+					g_pConPrintf("Server IP address %s:27015\n", publicIP);
 
 				if (FastDL_Start(g_selfDir, cfgGameDir, publicIP, g_fastdlPort))
 				{

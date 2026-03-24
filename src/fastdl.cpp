@@ -8,19 +8,34 @@
 
 extern void RealMasterLog(const char *fmt, ...);
 
+static void EnsureWsa()
+{
+	static bool init = false;
+	if (!init) { WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa); init = true; }
+}
+
 static bool HttpGetPlainText(const char *host, int port, const char *path, char *out, int outSize)
 {
+	EnsureWsa();
 	uint32_t ip = 0;
 	struct hostent *he = gethostbyname(host);
-	if (!he) return false;
+	if (!he)
+	{
+		RealMasterLog("FastDL: DNS failed for %s (WSAError=%d)", host, WSAGetLastError());
+		return false;
+	}
 	ip = *(uint32_t *)he->h_addr_list[0];
 
 	SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-	if (sock == INVALID_SOCKET) return false;
+	if (sock == INVALID_SOCKET)
+	{
+		RealMasterLog("FastDL: socket() failed (WSAError=%d)", WSAGetLastError());
+		return false;
+	}
 
-	struct timeval tv = { 3, 0 };
-	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
-	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof(tv));
+	DWORD timeout = 3000;
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char *)&timeout, sizeof(timeout));
 
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
@@ -30,6 +45,7 @@ static bool HttpGetPlainText(const char *host, int port, const char *path, char 
 
 	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0)
 	{
+		RealMasterLog("FastDL: connect to %s:%d failed (WSAError=%d)", host, port, WSAGetLastError());
 		closesocket(sock);
 		return false;
 	}
@@ -37,7 +53,13 @@ static bool HttpGetPlainText(const char *host, int port, const char *path, char 
 	char req[512];
 	int reqLen = snprintf(req, sizeof(req),
 		"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
-	send(sock, req, reqLen, 0);
+	int sent = send(sock, req, reqLen, 0);
+	if (sent <= 0)
+	{
+		RealMasterLog("FastDL: send failed (WSAError=%d)", WSAGetLastError());
+		closesocket(sock);
+		return false;
+	}
 
 	char buf[1024];
 	int total = 0;
@@ -50,9 +72,17 @@ static bool HttpGetPlainText(const char *host, int port, const char *path, char 
 	closesocket(sock);
 	buf[total] = '\0';
 
-	if (total < 12 || strncmp(buf, "HTTP/1.", 7) != 0) return false;
+	if (total < 12 || strncmp(buf, "HTTP/1.", 7) != 0)
+	{
+		RealMasterLog("FastDL: bad HTTP response from %s:%d (%d bytes, first='%.20s')", host, port, total, total > 0 ? buf : "(empty)");
+		return false;
+	}
 	int status = atoi(buf + 9);
-	if (status != 200) return false;
+	if (status != 200)
+	{
+		RealMasterLog("FastDL: HTTP %d from %s:%d", status, host, port);
+		return false;
+	}
 
 	char *body = strstr(buf, "\r\n\r\n");
 	if (!body) return false;
@@ -63,7 +93,11 @@ static bool HttpGetPlainText(const char *host, int port, const char *path, char 
 	while (body[len] && body[len] != '\r' && body[len] != '\n' && body[len] != ' ' && len < outSize - 1)
 		len++;
 
-	if (len < 7 || len > 45) return false;
+	if (len < 7 || len > 45)
+	{
+		RealMasterLog("FastDL: IP response bad length %d from %s:%d", len, host, port);
+		return false;
+	}
 
 	memcpy(out, body, len);
 	out[len] = '\0';
@@ -107,7 +141,14 @@ bool FastDL_GetPublicIP(char *out, int outSize, const char *masterAddr)
 		}
 	}
 
-	RealMasterLog("FastDL: trying ipinfo.io/ip");
+	RealMasterLog("FastDL: trying api.ipify.org");
+	if (HttpGetPlainText("api.ipify.org", 80, "/", out, outSize))
+	{
+		RealMasterLog("FastDL: got public IP from api.ipify.org: %s", out);
+		return true;
+	}
+
+	RealMasterLog("FastDL: trying ipinfo.io:80");
 	if (HttpGetPlainText("ipinfo.io", 80, "/ip", out, outSize))
 	{
 		RealMasterLog("FastDL: got public IP from ipinfo.io: %s", out);
@@ -281,11 +322,14 @@ static void HandleClient(SOCKET client)
 		return;
 	}
 
-	if (!isHttp11 || strncmp(userAgent, "Half-Life", 9) != 0)
-	{
-		closesocket(client);
-		return;
-	}
+	RealMasterLog("FastDL: %s %s (UA: %.30s, HTTP/1.1=%d)", method, path, userAgent, isHttp11);
+
+	// TODO: re-enable user agent restriction
+	// if (!isHttp11 || strncmp(userAgent, "Half-Life", 9) != 0)
+	// {
+	// 	closesocket(client);
+	// 	return;
+	// }
 
 	if (stricmp(method, "GET") != 0)
 	{
@@ -293,23 +337,51 @@ static void HandleClient(SOCKET client)
 		return;
 	}
 
+	char *qmark = strchr(path, '?');
+	if (qmark) *qmark = '\0';
+
 	char cleanedPath[256];
 	CleanPath(cleanedPath, sizeof(cleanedPath), path);
 
 	if (!IsPathSafe(cleanedPath) || !IsExtAllowed(cleanedPath))
 	{
+		RealMasterLog("FastDL: rejected path '%s' (safe=%d ext=%d)", cleanedPath, IsPathSafe(cleanedPath), IsExtAllowed(cleanedPath));
 		SendResponse(client, 404, "Not Found", "text/plain", "Not Found", 9);
 		closesocket(client);
 		return;
 	}
 
 	char fullPath[512];
-	snprintf(fullPath, sizeof(fullPath), "%s\\%s", g_baseDir, cleanedPath);
+	HANDLE hFile = INVALID_HANDLE_VALUE;
 
-	HANDLE hFile = CreateFileA(fullPath, GENERIC_READ, FILE_SHARE_READ, NULL,
+	snprintf(fullPath, sizeof(fullPath), "%s\\%s", g_baseDir, cleanedPath);
+	hFile = CreateFileA(fullPath, GENERIC_READ, FILE_SHARE_READ, NULL,
 		OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
 	if (hFile == INVALID_HANDLE_VALUE)
 	{
+		snprintf(fullPath, sizeof(fullPath), "%s_downloads\\%s", g_baseDir, cleanedPath);
+		hFile = CreateFileA(fullPath, GENERIC_READ, FILE_SHARE_READ, NULL,
+			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	}
+
+	if (hFile == INVALID_HANDLE_VALUE)
+	{
+		char valveDir[512];
+		strncpy(valveDir, g_baseDir, sizeof(valveDir) - 1);
+		char *lastSlash = strrchr(valveDir, '\\');
+		if (lastSlash)
+		{
+			strcpy(lastSlash + 1, "valve");
+			snprintf(fullPath, sizeof(fullPath), "%s\\%s", valveDir, cleanedPath);
+			hFile = CreateFileA(fullPath, GENERIC_READ, FILE_SHARE_READ, NULL,
+				OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+		}
+	}
+
+	if (hFile == INVALID_HANDLE_VALUE)
+	{
+		RealMasterLog("FastDL: file not found '%s' (searched base, downloads, valve)", cleanedPath);
 		SendResponse(client, 404, "Not Found", "text/plain", "Not Found", 9);
 		closesocket(client);
 		return;
