@@ -26,8 +26,11 @@ Features:
 - Incremental server list population (servers appear as they respond, like the original Steam behavior)
 - Sliding window A2S queries (128 concurrent, handles 3000+ server lists)
 - Enhanced `setmaster` console command with validation and VDF config writing
-- Heartbeat support for listen servers (register your server with any master)
+- Automatic heartbeats — master server loaded from VDF on server start, no manual `setmaster` needed
+- Public IP auto-detection and display (queries master server, falls back to api.ipify.org)
+- Built-in FastDL HTTP file server for map/resource downloads (TCP port 27015)
 - ReUnion-compatible non-Steam client support (RevEmu, SteamEmu, OldRevEmu, Xash3D, etc.)
+- Automatic `sv_lan 0` when master server is configured
 - Engine integration via runtime pattern scanning — no engine files modified
 - One universal `mastersrv.dll` works with both pre-anniversary and anniversary builds
 
@@ -48,7 +51,7 @@ Half-Life/
         └── ServerBrowser.dll          <- replace
 ```
 
-Launch with `-insecure` flag.
+Launch with `-insecure` flag. Forward port 27015 (TCP+UDP) in your router.
 
 ### GoldClient/CSPro
 
@@ -84,6 +87,8 @@ Edit `platform/config/MasterServers.vdf` to configure master servers:
 
 Masters are tried top-down — the first one that responds is used. If none respond, the local server cache is used as fallback. If the VDF file is missing, the default master `ms.cs16.net:27010` is used.
 
+The first master in the VDF is automatically loaded for heartbeats when a listen server starts — no manual `setmaster` required.
+
 ### reunion.cfg
 
 Controls non-Steam client authentication. Uses the same format and options as [ReUnion](https://github.com/rehlds/ReUnion). The default config shipped with the release accepts all common non-Steam emulator types.
@@ -103,34 +108,41 @@ Config search order:
 2. `platform/config/reunion.cfg`
 3. `reunion.cfg` (Half-Life root)
 
-### setmaster Console Command
+### Console Commands
 
-```
-setmaster <ip[:port]>
-```
+| Command | Description |
+|---------|-------------|
+| `setmaster <ip[:port]>` | Set master server (validates, writes VDF, starts heartbeats) |
+| `fastdl_port [port]` | Show or set FastDL HTTP port (default 27015, takes effect on restart) |
+| `heartbeat` | Send an extra heartbeat on demand |
+| `status` | Shows server info including public IP |
 
-| Feature | Details |
-|---------|---------|
-| Validation | Verifies master is reachable before saving (2s timeout) |
-| Persistence | Writes to `MasterServers.vdf` and reloads immediately |
-| Default port | 27010 if not specified |
-| Startup support | Works from launch options (`+setmaster ip:port`) and `config.cfg` |
-| Heartbeat | If a listen server is running, automatically registers it with the master |
-
-The command hooks into the engine's console system at runtime via pattern scanning — no engine files are modified. The engine's built-in `setmaster` (which only works for dedicated servers) is replaced transparently.
+`setmaster` and `fastdl_port` also work from launch options (`+setmaster`, `+fastdl_port`) and `config.cfg`.
 
 ## Hosting a Listen Server
 
-mastersrv.dll includes full heartbeat support for listen servers using the [Valve HL1 master server protocol](https://developer.valvesoftware.com/wiki/Master_Server_Query_Protocol):
+Just install the mod, configure `MasterServers.vdf`, and start a game. Everything else is automatic:
 
 1. Install the mod as described above
-2. Start a game (New Game or `map <mapname>` in console)
-3. Set `sv_lan 0` to make the server visible on the internet
-4. On the Anniversary edition, untick "Enable Steam Networking" in the server creation dialog
-5. Run `setmaster <master_ip:port>` to register with a master server
-6. Your server will appear in other players' server browsers
+2. Configure your master server in `MasterServers.vdf`
+3. Forward port **27015 TCP+UDP** in your router
+4. Start a game (New Game or `map <mapname>` in console)
+5. On the Anniversary edition, untick "Enable Steam Networking" in the server creation dialog
 
-Heartbeats are sent every 30 seconds using the engine's own server socket (port 27015). All heartbeat fields are resolved from the engine at runtime:
+On server start, mastersrv.dll automatically:
+- Loads the master server from `MasterServers.vdf`
+- Sets `sv_lan 0` for internet visibility
+- Detects your public IP (via master server or api.ipify.org)
+- Starts sending heartbeats every 30 seconds
+- Starts the FastDL HTTP server for map downloads
+- Sets `sv_downloadurl` to your public IP
+- Patches the engine's IP display to show your public IP
+
+Your server will appear in other players' server browsers, and non-Steam clients can join and download maps automatically.
+
+### Heartbeat Fields
+
+All heartbeat fields are resolved from the engine at runtime:
 
 | Field | Source |
 |-------|--------|
@@ -145,11 +157,17 @@ Heartbeats are sent every 30 seconds using the engine's own server socket (port 
 | `secure` | `-insecure` command line detection |
 | `type` | `l` (listen) or `d` (dedicated) via module check |
 
-Port 27015 (UDP) must be open in your router and firewall for the master server to verify your server and for players to connect.
+## FastDL (HTTP File Server)
 
-The engine's built-in `heartbeat` console command can be used to send an extra heartbeat on demand. When the server is stopped, heartbeats cease automatically.
+mastersrv.dll embeds a lightweight HTTP file server that serves game files (maps, models, resources) to clients. This enables non-Steam clients (Xash3D, browser-based) that lack UDP file transfer to download missing content.
 
-You can also put `setmaster <ip:port>` in `config.cfg` or use `+setmaster <ip:port>` in launch options for automatic registration on every start.
+- **Port**: TCP 27015 by default (same port as game's UDP — one port forwarding rule covers both)
+- **Auto-start**: Starts when the server starts, stops when the server stops
+- **sv_downloadurl**: Automatically set to `http://<public_ip>:27015`
+- **File search**: Serves from `cstrike/`, `cstrike_downloads/`, and `valve/` directories
+- **Security**: Extension whitelist (bsp, mdl, wav, spr, wad, etc.), path traversal prevention, no config files served
+- **Performance**: Thread-per-connection (up to 4 concurrent), 64KB streaming
+- **Configurable**: `fastdl_port` console command, `+fastdl_port` launch option, or `fastdl_port` in config.cfg
 
 ## Non-Steam Client Support
 
@@ -171,6 +189,7 @@ Runtime patches applied to hw.dll (no files modified on disk):
 - `CreateUnauthenticatedUserConnection` for bot Steam sessions
 - Auth callback flag patches to prevent async Steam kicks
 - Certificate length check bypass for non-Steam tickets
+- Server IP display patch (shows public IP instead of local)
 
 Configure via `reunion.cfg` — uses the same format as the [ReUnion plugin](https://github.com/rehlds/ReUnion).
 
@@ -213,8 +232,10 @@ mastersrv.dll (proxy DLL)
     ├── A2S_INFO: Sliding window (128 concurrent, 2s per-server timeout)
     ├── Caches: platform/cache/servers.dat
     ├── Engine hook: pattern scans hw.dll for console commands, cvars, server state
-    ├── Heartbeat: challenge-response via engine's server socket (port 27015)
-    └── Reunion: non-Steam auth via emulator detection + CreateUnauthenticatedUserConnection
+    ├── Heartbeat: auto-load from VDF, challenge-response via engine's server socket
+    ├── FastDL: embedded HTTP file server (TCP 27015, thread-per-connection)
+    ├── Public IP: cascade detection (master /ip → api.ipify.org → engine cvar)
+    └── Reunion: emulator detection chain + CreateUnauthenticatedUserConnection
 ```
 
 ### Proxy DLL Exports
@@ -252,6 +273,7 @@ mastersrv.dll hooks into the engine without modifying any files. During the firs
 | Command linked list head | `MOV reg, [addr]` in `Cmd_AddCommand` body |
 | Steam validation function | String `"STEAM validation rejected"` → preceding CALL target |
 | Auth callback handler | Byte pattern `8A 81 86 00 00 00 84 C0` (flag check in callback) |
+| Server netadr_t global | String `"Server IP address %s"` → `MOV ESI, imm32` before PUSH |
 
 ### Protocols
 
@@ -266,3 +288,8 @@ mastersrv.dll hooks into the engine without modifying any files. During the firs
 **A2S_INFO** (client → game server):
 - Request: `0xFFFFFFFF 0x54 "Source Engine Query\0"`
 - Response: Server name, map, players, maxplayers, bots, ping, etc.
+
+**FastDL** (client → server HTTP):
+- Request: `GET /maps/de_dust2.bsp HTTP/1.1`
+- Response: File contents with `Content-Length` header
+- Searches: `cstrike/` → `cstrike_downloads/` → `valve/`
