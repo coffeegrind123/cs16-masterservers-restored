@@ -9,6 +9,7 @@
 #include "vdf_parser.h"
 #include "utils.h"
 #include "reunion.h"
+#include "fastdl.h"
 
 static HMODULE g_hSelf = NULL;
 static HMODULE g_hRealSteamApi = NULL;
@@ -31,6 +32,7 @@ static char *g_pGameDir = NULL;
 static DWORD g_lastHeartbeat = 0;
 static bool g_heartbeatActive = false;
 static char g_heartbeatMaster[256] = {0};
+static int g_fastdlPort = FASTDL_DEFAULT_PORT;
 
 static void StripQuotes(char *s)
 {
@@ -748,6 +750,58 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 		}
 	}
 
+	static bool g_fastdlStarted = false;
+	if (g_engineHooked && g_pServerState && *(int *)g_pServerState != 0 && !g_fastdlStarted)
+	{
+		g_fastdlStarted = true;
+
+		if (g_pCvarFindVar)
+		{
+			cvar_t *cvUrl = g_pCvarFindVar("sv_downloadurl");
+			if (cvUrl && cvUrl->string && cvUrl->string[0])
+			{
+				RealMasterLog("FastDL: sv_downloadurl already set to '%s', skipping", cvUrl->string);
+			}
+			else
+			{
+				char cfgGameDir[64] = "cstrike";
+				if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
+				{
+					const char *lastSlash = strrchr(g_pGameDir, '\\');
+					if (lastSlash && lastSlash[1])
+						strncpy(cfgGameDir, lastSlash + 1, sizeof(cfgGameDir) - 1);
+					else
+						strncpy(cfgGameDir, g_pGameDir, sizeof(cfgGameDir) - 1);
+				}
+
+				static char publicIP[64] = {0};
+				if (!FastDL_GetPublicIP(publicIP, sizeof(publicIP), g_heartbeatMaster))
+				{
+					const char *fallback = GetCvarString("ip");
+					if (!fallback[0]) fallback = GetCvarString("hostip");
+					strncpy(publicIP, fallback[0] ? fallback : "0.0.0.0", sizeof(publicIP) - 1);
+					RealMasterLog("FastDL: using fallback IP: %s", publicIP);
+				}
+
+				if (FastDL_Start(g_selfDir, cfgGameDir, publicIP, g_fastdlPort))
+				{
+					if (cvUrl)
+					{
+						static char downloadUrl[256];
+						snprintf(downloadUrl, sizeof(downloadUrl), "http://%s:%d", publicIP, g_fastdlPort);
+						cvUrl->string = downloadUrl;
+						RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
+					}
+				}
+			}
+		}
+	}
+	else if (g_fastdlStarted && g_pServerState && *(int *)g_pServerState == 0)
+	{
+		FastDL_Stop();
+		g_fastdlStarted = false;
+	}
+
 	if (g_heartbeatActive && g_heartbeatMaster[0])
 	{
 		if (g_pServerState && *(int *)g_pServerState != 0)
@@ -882,6 +936,19 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 				RealMasterLog("Pending +setmaster: %s", g_pendingSetmaster);
 		}
 
+		const char *fp = strstr(cmdLine, "+fastdl_port");
+		if (fp)
+		{
+			fp += 12;
+			while (*fp == ' ') fp++;
+			int port = atoi(fp);
+			if (port > 0 && port < 65536)
+			{
+				g_fastdlPort = port;
+				RealMasterLog("Pending +fastdl_port: %d", g_fastdlPort);
+			}
+		}
+
 		if (!g_pendingSetmaster[0])
 		{
 			char cfgPath[512];
@@ -909,6 +976,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 						StripQuotes(g_pendingSetmaster);
 						if (g_pendingSetmaster[0])
 							RealMasterLog("Pending setmaster from %s: %s", cfgNames[c], g_pendingSetmaster);
+					}
+					if (strnicmp(p, "fastdl_port", 11) == 0 && (p[11] == ' ' || p[11] == '\t'))
+					{
+						p += 11;
+						while (*p == ' ' || *p == '\t') p++;
+						int port = atoi(p);
+						if (port > 0 && port < 65536)
+						{
+							g_fastdlPort = port;
+							RealMasterLog("fastdl_port from %s: %d", cfgNames[c], g_fastdlPort);
+						}
 					}
 				}
 				fclose(cfg);
@@ -951,6 +1029,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 	}
 	else if (fdwReason == DLL_PROCESS_DETACH)
 	{
+		FastDL_Stop();
 		if (g_logCSInit) { DeleteCriticalSection(&g_logCS); g_logCSInit = false; }
 	}
 	return TRUE;

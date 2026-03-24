@@ -12,7 +12,8 @@ SOURCES = src/dllmain.cpp \
 	src/reunion.cpp \
 	src/reunion_auth.cpp \
 	src/rijndael.cpp \
-	src/sha2.cpp
+	src/sha2.cpp \
+	src/fastdl.cpp
 
 INCLUDE = -Isrc
 
