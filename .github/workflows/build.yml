@@ -112,7 +112,7 @@ jobs:
             ## Build Info
 
             - Commit: [`${{ steps.version.outputs.short_hash }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
-            - [Build log](${{ steps.logs.outputs.url }})
+            - [Build log](${{ steps.logs.outputs.url }}) (log in to view)
 
             See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for installation instructions.
           draft: false
