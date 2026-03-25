@@ -3,6 +3,10 @@
 
 Brings back working server browsers and listen server hosting for Counter-Strike 1.6. Supports Steam Legacy, Anniversary Update, and non-Steam (GoldClient) editions.
 
+| Steam Legacy | Anniversary | GoldClient |
+|:---:|:---:|:---:|
+| ![Steam Legacy](screenshots/steam_legacy.png) | ![Anniversary](screenshots/anniversary.png) | ![GoldClient](screenshots/goldclient.png) |
+
 ## Player Guide
 
 ### Download
