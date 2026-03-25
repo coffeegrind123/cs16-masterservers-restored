@@ -33,6 +33,7 @@ static DWORD g_lastHeartbeat = 0;
 static bool g_heartbeatActive = false;
 static char g_heartbeatMaster[256] = {0};
 static int g_fastdlPort = FASTDL_DEFAULT_PORT;
+static uint8_t *g_pServerNetadr = NULL;
 
 static void StripQuotes(char *s)
 {
@@ -669,15 +670,45 @@ static void InitEngineHook()
 			{
 				uint8_t ipPush[5] = { 0x68 };
 				memcpy(ipPush + 1, &ipStr, 4);
-				uint8_t *ipPushRef = FindPattern(base, imageSize, ipPush, 5);
-				if (ipPushRef && ipPushRef[-1] == 0x50 && ipPushRef[5] == 0xE8)
+				uint8_t *searchFrom = base;
+				int nopCount = 0;
+				for (int attempt = 0; attempt < 4; attempt++)
 				{
-					DWORD op;
-					VirtualProtect(ipPushRef - 1, 14, PAGE_EXECUTE_READWRITE, &op);
-					memset(ipPushRef - 1, 0x90, 14);
-					VirtualProtect(ipPushRef - 1, 14, op, &op);
-					RealMasterLog("Engine hook: NOPed Server IP address print");
+					uint8_t *ipPushRef = FindPattern(searchFrom, imageSize - (searchFrom - base), ipPush, 5);
+					if (!ipPushRef) break;
+					if (ipPushRef[-1] == 0x50 && ipPushRef[5] == 0xE8)
+					{
+						if (!g_pServerNetadr)
+						{
+							for (uint8_t *s = ipPushRef - 32; s < ipPushRef - 3; s++)
+							{
+								if (s[0] >= 0xB8 && s[0] <= 0xBF)
+								{
+									uint8_t *t = *(uint8_t **)(s + 1);
+									if (t >= base && t < base + imageSize) { g_pServerNetadr = t; break; }
+								}
+								if (s[0] == 0x0F && s[1] == 0x10 && s[2] == 0x05)
+								{
+									uint8_t *t = *(uint8_t **)(s + 3);
+									if (t >= base && t < base + imageSize) { g_pServerNetadr = t; break; }
+								}
+							}
+							if (g_pServerNetadr)
+								RealMasterLog("Engine hook: server netadr at %p", g_pServerNetadr);
+						}
+						int nopLen = 11;
+						if (ipPushRef[10] == 0x83 && ipPushRef[11] == 0xC4)
+							nopLen = 14;
+						DWORD op;
+						VirtualProtect(ipPushRef - 1, nopLen, PAGE_EXECUTE_READWRITE, &op);
+						memset(ipPushRef - 1, 0x90, nopLen);
+						VirtualProtect(ipPushRef - 1, nopLen, op, &op);
+						nopCount++;
+					}
+					searchFrom = ipPushRef + 5;
 				}
+				if (nopCount > 0)
+					RealMasterLog("Engine hook: NOPed %d Server IP address print(s)", nopCount);
 			}
 
 			g_engineHooked = true;
@@ -872,45 +903,13 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 				}
 
 				uint32_t pubIP = inet_addr(publicIP);
-				if (pubIP != INADDR_NONE && pubIP != 0)
+				if (pubIP != INADDR_NONE && pubIP != 0 && g_pServerNetadr)
 				{
-					HMODULE hHw = GetModuleHandleA("hw.dll");
-					if (hHw)
-					{
-						IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)hHw;
-						IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((uint8_t *)hHw + dos->e_lfanew);
-						uint8_t *hwBase = (uint8_t *)hHw;
-						size_t hwSize = nt->OptionalHeader.SizeOfImage;
-
-						const char *ipStr = "Server IP address %s\n";
-						uint8_t *strAddr = FindPattern(hwBase, hwSize, (const uint8_t *)ipStr, strlen(ipStr));
-						if (strAddr)
-						{
-							uint8_t pushPat[5] = { 0x68 };
-							memcpy(pushPat + 1, &strAddr, 4);
-							uint8_t *pushRef = FindPattern(hwBase, hwSize, pushPat, 5);
-							if (pushRef)
-							{
-								for (uint8_t *p = pushRef - 32; p < pushRef; p++)
-								{
-									if (p[0] == 0xBE)
-									{
-										uint8_t *netadr = *(uint8_t **)(p + 1);
-										if (netadr >= hwBase && netadr < hwBase + hwSize)
-										{
-											DWORD oldProt;
-											VirtualProtect(netadr + 4, 4, PAGE_EXECUTE_READWRITE, &oldProt);
-											memcpy(netadr + 4, &pubIP, 4);
-											VirtualProtect(netadr + 4, 4, oldProt, &oldProt);
-											RealMasterLog("FastDL: patched server IP to %s", publicIP);
-										}
-
-										break;
-									}
-								}
-							}
-						}
-					}
+					DWORD oldProt;
+					VirtualProtect(g_pServerNetadr + 4, 4, PAGE_EXECUTE_READWRITE, &oldProt);
+					memcpy(g_pServerNetadr + 4, &pubIP, 4);
+					VirtualProtect(g_pServerNetadr + 4, 4, oldProt, &oldProt);
+					RealMasterLog("FastDL: patched server IP at %p to %s", g_pServerNetadr, publicIP);
 				}
 
 				if (g_pConPrintf)

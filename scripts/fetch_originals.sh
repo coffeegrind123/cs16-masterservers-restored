@@ -29,4 +29,24 @@ fetch_serverbrowser() {
 
 fetch_serverbrowser "-branch steam_legacy" "originals/pre-anniversary"
 fetch_serverbrowser "" "originals/anniversary"
+
+fetch_goldclient() {
+    local tmpdir=$(mktemp -d)
+    local url="https://github.com/gold-plus/builds/releases/download/2.5.6.0/CS_GoldClient.zip"
+
+    echo "Fetching GoldClient from $url ..."
+    wget -qO "$tmpdir/gc.zip" "$url"
+    unzip -qo "$tmpdir/gc.zip" -d "$tmpdir/gc"
+
+    local src=$(find "$tmpdir/gc" -path "*/CS 1.6 GoldClient/steam_api.dll" -print -quit)
+    [[ -f "$src" ]] || src=$(find "$tmpdir/gc" -iname "steam_api.dll" -print -quit)
+    [[ -f "$src" ]] || { echo "FAIL: steam_api.dll not found in GoldClient zip"; find "$tmpdir/gc" -type f; exit 1; }
+
+    mkdir -p "$ROOT/originals/goldclient"
+    cp "$src" "$ROOT/originals/goldclient/steam_api.dll"
+    echo "OK: originals/goldclient/steam_api.dll ($(stat -c%s "$ROOT/originals/goldclient/steam_api.dll") bytes)"
+    rm -rf "$tmpdir"
+}
+
+fetch_goldclient
 echo "All originals fetched successfully."

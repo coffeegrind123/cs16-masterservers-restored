@@ -12,3 +12,4 @@ Half-Life/
 .env
 originals/pre-anniversary/*.dll
 originals/anniversary/*.dll
+originals/goldclient/steam_api.dll
