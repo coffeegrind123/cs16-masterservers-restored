@@ -52,7 +52,7 @@ goldclient: $(DLL)
 	mkdir -p $(OUT_GOLD)
 	cp originals/goldclient/steam_api.dll $(OUT_GOLD)/steam_api.dll
 	python3 scripts/patch_gms_urls.py $(OUT_GOLD)/steam_api.dll
-	cp originals/goldclient/hosts_append.txt $(OUT_GOLD)/hosts_append.txt
+	cp hosts_append.txt $(OUT_GOLD)/hosts_append.txt
 
 $(DLL): $(SOURCES)
 	mkdir -p $(OUT)
