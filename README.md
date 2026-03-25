@@ -95,7 +95,7 @@ Everything else is automatic:
 Your game server needs two plugins installed on [ReHLDS](https://github.com/dreamstalker/rehlds):
 
 - **[ReUnion](https://github.com/rehlds/ReUnion)** — accepts non-Steam clients (protocol 47/48)
-- **[rehlmaster](https://github.com/your-link-here)** — custom master server registration
+- **[rehlmaster](https://github.com/anzz1/rehlmaster)** — custom master server registration
 
 #### reunion.cfg
 
