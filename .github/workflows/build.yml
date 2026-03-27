@@ -117,4 +117,5 @@ jobs:
             See [README](https://github.com/${{ github.repository }}/blob/main/README.md) for installation instructions.
           draft: false
           prerelease: false
+          makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
