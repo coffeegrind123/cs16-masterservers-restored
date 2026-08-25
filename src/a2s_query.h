@@ -9,6 +9,7 @@ struct a2s_server_info_t
 	char gamedir[256];
 	char gamedesc[256];
 	uint16_t appid;
+	uint8_t protocol;
 	uint8_t players;
 	uint8_t max_players;
 	uint8_t bots;
@@ -24,7 +25,13 @@ struct a2s_server_info_t
 };
 #pragma pack(pop)
 
+#define A2S_INFO_REQUEST_MAX 29
+
 extern const uint8_t A2S_INFO_REQUEST[25];
+
+bool a2s_is_challenge(const uint8_t *data, int len, uint32_t *out_challenge);
+int a2s_build_info_request(uint8_t *out, int out_size, const uint32_t *challenge);
+
 bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out);
 bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out, int timeout_ms = 2000);
 

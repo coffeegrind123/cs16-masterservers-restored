@@ -35,6 +35,11 @@ static char g_heartbeatMaster[256] = {0};
 static int g_fastdlPort = FASTDL_DEFAULT_PORT;
 static uint8_t *g_pServerNetadr = NULL;
 
+static char g_asyncPublicIP[64] = {0};
+static volatile LONG g_asyncIpReady = 0;
+static volatile LONG g_asyncIpFetching = 0;
+
+
 static void StripQuotes(char *s)
 {
 	int len = (int)strlen(s);
@@ -75,6 +80,18 @@ typedef void (__cdecl *ConPrintf_t)(const char *fmt, ...);
 
 struct cvar_t { char *name; char *string; int flags; float value; cvar_t *next; };
 typedef cvar_t *(__cdecl *CvarFindVar_t)(const char *name);
+
+/* cvar_t::string points at a Z_Malloc block the engine Z_Free's on the next
+   Cvar_DirectSet. Replacing the pointer with one of ours is a guaranteed
+   "Z_Free: freed a pointer without ZONEID" Sys_Error, so only ever write
+   through the buffer the engine already owns. */
+static bool SetCvarStringInPlace(cvar_t *cv, const char *value)
+{
+	if (!cv || !cv->string || !value) return false;
+	if (strlen(cv->string) < strlen(value)) return false;
+	strcpy(cv->string, value);
+	return true;
+}
 
 static CmdArgc_t g_pCmdArgc = NULL;
 static CmdArgv_t g_pCmdArgv = NULL;
@@ -781,6 +798,22 @@ static void EnsureRealSteamApi()
 	if (!pfn_##name && g_hRealSteamApi) \
 		pfn_##name = (GenericSteamFunc_t)GetProcAddress(g_hRealSteamApi, #name);
 
+/* FastDL_GetPublicIP does a blocking HTTP round-trip. Running it inline in
+   SteamAPI_RunCallbacks stalls the engine's main loop for the whole request,
+   so resolve the address on a worker thread and poll the result instead. */
+static DWORD WINAPI FetchPublicIPThread(LPVOID)
+{
+	char ip[64] = {0};
+	if (!FastDL_GetPublicIP(ip, sizeof(ip), g_heartbeatMaster))
+		ip[0] = '\0';
+
+	strncpy(g_asyncPublicIP, ip, sizeof(g_asyncPublicIP) - 1);
+	g_asyncPublicIP[sizeof(g_asyncPublicIP) - 1] = '\0';
+
+	InterlockedExchange((LONG *)&g_asyncIpReady, 1);
+	return 0;
+}
+
 extern "C" __declspec(dllexport) ISteamMatchmakingServers * __cdecl SteamMatchmakingServers()
 {
 	EnsureWsa();
@@ -848,8 +881,10 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 				if (svlan && svlan->value != 0.0f)
 				{
 					svlan->value = 0.0f;
-					svlan->string = (char *)"0";
-					RealMasterLog("Auto-set sv_lan 0 (master server configured)");
+					if (SetCvarStringInPlace(svlan, "0"))
+						RealMasterLog("Auto-set sv_lan 0 (master server configured)");
+					else
+						RealMasterLog("Auto-set sv_lan value 0 (string buffer unwritable)");
 				}
 			}
 
@@ -868,8 +903,6 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 	static bool g_fastdlStarted = false;
 	if (g_engineHooked && g_pServerState && *(int *)g_pServerState != 0 && !g_fastdlStarted)
 	{
-		g_fastdlStarted = true;
-
 		if (g_pCvarFindVar)
 		{
 			cvar_t *cvUrl = g_pCvarFindVar("sv_downloadurl");
@@ -880,9 +913,27 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 			{
 				RealMasterLog("FastDL: sv_downloadurl already set to '%s', skipping", cvUrl->string);
 				skipFastdl = true;
+				g_fastdlStarted = true;
 			}
-			if (!skipFastdl)
+
+			if (!skipFastdl && !InterlockedCompareExchange((LONG *)&g_asyncIpFetching, 1, 0))
 			{
+				InterlockedExchange((LONG *)&g_asyncIpReady, 0);
+				HANDLE hThread = CreateThread(NULL, 0, FetchPublicIPThread, NULL, 0, NULL);
+				if (hThread)
+				{
+					CloseHandle(hThread);
+				}
+				else
+				{
+					RealMasterLog("FastDL: CreateThread failed, resolving public IP inline");
+					FetchPublicIPThread(NULL);
+				}
+			}
+			else if (!skipFastdl && g_asyncIpReady)
+			{
+				g_fastdlStarted = true;
+
 				char cfgGameDir[64] = "cstrike";
 				if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
 				{
@@ -893,36 +944,41 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 						strncpy(cfgGameDir, g_pGameDir, sizeof(cfgGameDir) - 1);
 				}
 
-				static char publicIP[64] = {0};
-				if (!FastDL_GetPublicIP(publicIP, sizeof(publicIP), g_heartbeatMaster))
+				if (!g_asyncPublicIP[0])
 				{
 					const char *fallback = GetCvarString("ip");
 					if (!fallback[0]) fallback = GetCvarString("hostip");
-					strncpy(publicIP, fallback[0] ? fallback : "0.0.0.0", sizeof(publicIP) - 1);
-					RealMasterLog("FastDL: using fallback IP: %s", publicIP);
+					strncpy(g_asyncPublicIP, fallback[0] ? fallback : "0.0.0.0", sizeof(g_asyncPublicIP) - 1);
+					RealMasterLog("FastDL: using fallback IP: %s", g_asyncPublicIP);
 				}
 
-				uint32_t pubIP = inet_addr(publicIP);
+				uint32_t pubIP = inet_addr(g_asyncPublicIP);
 				if (pubIP != INADDR_NONE && pubIP != 0 && g_pServerNetadr)
 				{
 					DWORD oldProt;
 					VirtualProtect(g_pServerNetadr + 4, 4, PAGE_EXECUTE_READWRITE, &oldProt);
 					memcpy(g_pServerNetadr + 4, &pubIP, 4);
 					VirtualProtect(g_pServerNetadr + 4, 4, oldProt, &oldProt);
-					RealMasterLog("FastDL: patched server IP at %p to %s", g_pServerNetadr, publicIP);
+					RealMasterLog("FastDL: patched server IP at %p to %s", g_pServerNetadr, g_asyncPublicIP);
 				}
 
 				if (g_pConPrintf)
-					g_pConPrintf("Server IP address %s:27015\n", publicIP);
+					g_pConPrintf("Server IP address %s:27015\n", g_asyncPublicIP);
 
-				if (FastDL_Start(g_selfDir, cfgGameDir, publicIP, g_fastdlPort))
+				if (FastDL_Start(g_selfDir, cfgGameDir, g_asyncPublicIP, g_fastdlPort))
 				{
 					if (cvUrl)
 					{
-						static char downloadUrl[256];
-						snprintf(downloadUrl, sizeof(downloadUrl), "http://%s:%d", publicIP, g_fastdlPort);
-						cvUrl->string = downloadUrl;
-						RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
+						char downloadUrl[256];
+						snprintf(downloadUrl, sizeof(downloadUrl), "http://%s:%d", g_asyncPublicIP, g_fastdlPort);
+
+						if (SetCvarStringInPlace(cvUrl, downloadUrl))
+							RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
+						else
+							RealMasterLog("FastDL: cannot auto-set sv_downloadurl (engine buffer holds %u bytes, "
+								"need %u). Add sv_downloadurl \"%s\" to server.cfg.",
+								(unsigned)(cvUrl->string ? strlen(cvUrl->string) : 0),
+								(unsigned)strlen(downloadUrl), downloadUrl);
 					}
 				}
 			}
@@ -932,6 +988,16 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 	{
 		FastDL_Stop();
 		g_fastdlStarted = false;
+
+		/* Only re-arm once the worker has published its result; clearing the
+		   fetching flag with a lookup still in flight would let the next map
+		   spawn a second thread writing the same buffer. */
+		if (g_asyncIpReady)
+		{
+			InterlockedExchange((LONG *)&g_asyncIpReady, 0);
+			InterlockedExchange((LONG *)&g_asyncIpFetching, 0);
+			g_asyncPublicIP[0] = '\0';
+		}
 	}
 
 	if (g_heartbeatActive && g_heartbeatMaster[0])

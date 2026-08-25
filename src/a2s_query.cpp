@@ -24,20 +24,44 @@ static const char *read_string(const uint8_t *data, int len, int *pos, char *out
 	return out;
 }
 
-bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
+static void skip_string(const uint8_t *data, int len, int *pos)
 {
-	if (len < 6) return false;
+	while (*pos < len && data[*pos] != 0) (*pos)++;
+	if (*pos < len) (*pos)++;
+}
+
+bool a2s_is_challenge(const uint8_t *data, int len, uint32_t *out_challenge)
+{
+	if (len < 9) return false;
 	if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
 		return false;
+	if (data[4] != 0x41) return false;
 
-	if (data[4] == 0x41)
+	if (out_challenge)
+		memcpy(out_challenge, data + 5, 4);
+	return true;
+}
+
+int a2s_build_info_request(uint8_t *out, int out_size, const uint32_t *challenge)
+{
+	int len = (int)sizeof(A2S_INFO_REQUEST);
+	if (out_size < len) return 0;
+
+	memcpy(out, A2S_INFO_REQUEST, len);
+
+	if (challenge)
 	{
-		return false;
+		if (out_size < len + 4) return len;
+		memcpy(out + len, challenge, 4);
+		len += 4;
 	}
+	return len;
+}
 
-	if (data[4] != 0x49) return false;
-
-	int pos = 6;
+static bool parse_a2s_source_info(const uint8_t *data, int len, int pos, a2s_server_info_t *out)
+{
+	if (pos >= len) return false;
+	out->protocol = data[pos++];
 
 	read_string(data, len, &pos, out->name, sizeof(out->name));
 	read_string(data, len, &pos, out->map, sizeof(out->map));
@@ -64,6 +88,64 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 	return true;
 }
 
+/* Legacy GoldSrc info reply ('m'): leading address string, no AppID, and the
+   optional mod block sits between the visibility and VAC bytes. */
+static bool parse_a2s_goldsrc_info(const uint8_t *data, int len, int pos, a2s_server_info_t *out)
+{
+	skip_string(data, len, &pos);
+
+	read_string(data, len, &pos, out->name, sizeof(out->name));
+	read_string(data, len, &pos, out->map, sizeof(out->map));
+	read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
+	read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
+
+	if (pos + 6 > len) return false;
+
+	out->players = data[pos++];
+	out->max_players = data[pos++];
+	out->protocol = data[pos++];
+	out->type = (char)data[pos++];
+	out->os = (char)data[pos++];
+	out->password = data[pos++];
+
+	if (pos >= len) return false;
+	uint8_t is_mod = data[pos++];
+
+	if (is_mod == 1)
+	{
+		skip_string(data, len, &pos);	/* mod website */
+		skip_string(data, len, &pos);	/* mod download url */
+		if (pos < len) pos++;			/* NUL filler */
+		pos += 4;						/* mod version */
+		pos += 4;						/* mod size */
+		if (pos + 2 > len) return false;
+		pos++;							/* server-side only */
+		pos++;							/* custom client dll */
+	}
+
+	if (pos + 2 > len) return false;
+	out->secure = data[pos++];
+	out->bots = data[pos++];
+
+	out->valid = true;
+	return true;
+}
+
+bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
+{
+	if (len < 6) return false;
+	if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
+		return false;
+
+	if (data[4] == 0x49)
+		return parse_a2s_source_info(data, len, 5, out);
+
+	if (data[4] == 0x6D)
+		return parse_a2s_goldsrc_info(data, len, 5, out);
+
+	return false;
+}
+
 bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out, int timeout_ms)
 {
 	memset(out, 0, sizeof(*out));
@@ -77,39 +159,73 @@ bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out
 	dest.sin_addr.s_addr = ip_net;
 	dest.sin_port = port_net;
 
-	DWORD start = GetTickCount();
-
-	if (sendto(sock, (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
-		(struct sockaddr *)&dest, sizeof(dest)) == SOCKET_ERROR)
-	{
-		closesocket(sock);
-		return false;
-	}
-
-	fd_set readfds;
-	FD_ZERO(&readfds);
-	FD_SET(sock, &readfds);
-
-	struct timeval tv;
-	tv.tv_sec = timeout_ms / 1000;
-	tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-	if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
-	{
-		closesocket(sock);
-		return false;
-	}
+	uint8_t req[A2S_INFO_REQUEST_MAX];
+	int req_len = a2s_build_info_request(req, sizeof(req), NULL);
 
 	uint8_t buf[2048];
-	struct sockaddr_in from;
-	int fromlen = sizeof(from);
-	int recv_len = recvfrom(sock, (char *)buf, sizeof(buf), 0,
-		(struct sockaddr *)&from, &fromlen);
+	DWORD deadline = GetTickCount() + timeout_ms;
+	DWORD start = 0;
+	DWORD elapsed = 0;
+	int recv_len = 0;
+	bool challenged = false;
 
-	DWORD elapsed = GetTickCount() - start;
+	/* One extra round-trip is allowed for the A2S_SERVERQUERY_GETCHALLENGE
+	   reply that ReHLDS and post-2020 Valve builds send first. */
+	for (int attempt = 0; attempt < 2; attempt++)
+	{
+		start = GetTickCount();
+
+		if (sendto(sock, (const char *)req, req_len, 0,
+			(struct sockaddr *)&dest, sizeof(dest)) == SOCKET_ERROR)
+		{
+			closesocket(sock);
+			return false;
+		}
+
+		DWORD now = GetTickCount();
+		if (now >= deadline)
+		{
+			closesocket(sock);
+			return false;
+		}
+
+		fd_set readfds;
+		FD_ZERO(&readfds);
+		FD_SET(sock, &readfds);
+
+		DWORD remain = deadline - now;
+		struct timeval tv;
+		tv.tv_sec = remain / 1000;
+		tv.tv_usec = (remain % 1000) * 1000;
+
+		if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
+		{
+			closesocket(sock);
+			return false;
+		}
+
+		struct sockaddr_in from;
+		int fromlen = sizeof(from);
+		recv_len = recvfrom(sock, (char *)buf, sizeof(buf), 0,
+			(struct sockaddr *)&from, &fromlen);
+
+		elapsed = GetTickCount() - start;
+
+		if (recv_len <= 0)
+		{
+			closesocket(sock);
+			return false;
+		}
+
+		uint32_t challenge;
+		if (challenged || !a2s_is_challenge(buf, recv_len, &challenge))
+			break;
+
+		challenged = true;
+		req_len = a2s_build_info_request(req, sizeof(req), &challenge);
+	}
+
 	closesocket(sock);
-
-	if (recv_len <= 0) return false;
 
 	if (!parse_a2s_response(buf, recv_len, out)) return false;
 
@@ -134,11 +250,13 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 
 		SOCKET socks[64];
 		DWORD starts[64];
+		bool challenged[64];
 
 		for (int i = 0; i < batch; i++)
 		{
 			int idx = base + i;
 			memset(&results[idx], 0, sizeof(results[idx]));
+			challenged[i] = false;
 
 			socks[i] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 			if (socks[i] == INVALID_SOCKET) continue;
@@ -149,8 +267,11 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 			dest.sin_addr.s_addr = ips[idx];
 			dest.sin_port = ports[idx];
 
+			uint8_t req[A2S_INFO_REQUEST_MAX];
+			int req_len = a2s_build_info_request(req, sizeof(req), NULL);
+
 			starts[i] = GetTickCount();
-			sendto(socks[i], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+			sendto(socks[i], (const char *)req, req_len, 0,
 				(struct sockaddr *)&dest, sizeof(dest));
 		}
 
@@ -197,6 +318,26 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 					(struct sockaddr *)&from, &fromlen);
 
 				DWORD elapsed = GetTickCount() - starts[i];
+
+				uint32_t challenge;
+				if (recv_len > 0 && !challenged[i] &&
+					a2s_is_challenge(buf, recv_len, &challenge))
+				{
+					uint8_t req[A2S_INFO_REQUEST_MAX];
+					int req_len = a2s_build_info_request(req, sizeof(req), &challenge);
+
+					struct sockaddr_in dest;
+					memset(&dest, 0, sizeof(dest));
+					dest.sin_family = AF_INET;
+					dest.sin_addr.s_addr = ips[idx];
+					dest.sin_port = ports[idx];
+
+					challenged[i] = true;
+					starts[i] = GetTickCount();
+					sendto(socks[i], (const char *)req, req_len, 0,
+						(struct sockaddr *)&dest, sizeof(dest));
+					continue;
+				}
 
 				if (recv_len > 0 && parse_a2s_response(buf, recv_len, &results[idx]))
 				{

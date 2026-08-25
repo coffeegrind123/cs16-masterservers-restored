@@ -22,6 +22,7 @@ struct QueryThreadData
 	CRealMasterMatchmaking *self;
 	gameserveritem_t *servers;
 	volatile int *serverCount;
+	uint32_t appId;
 };
 
 static void load_master_list()
@@ -164,7 +165,12 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
 	SOCKET socks[MAX_GAME_SERVERS];
 	DWORD sendTimes[MAX_GAME_SERVERS];
-	for (int i = 0; i < total; i++) socks[i] = INVALID_SOCKET;
+	bool challenged[MAX_GAME_SERVERS];
+	for (int i = 0; i < total; i++)
+	{
+		socks[i] = INVALID_SOCKET;
+		challenged[i] = false;
+	}
 
 	int nextToSend = 0;
 	int activeCount = 0;
@@ -181,10 +187,32 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 		dest.sin_addr.s_addr = master_result.servers[idx].ip;
 		dest.sin_port = master_result.servers[idx].port;
 
+		uint8_t req[A2S_INFO_REQUEST_MAX];
+		int req_len = a2s_build_info_request(req, sizeof(req), NULL);
+
 		sendTimes[idx] = GetTickCount();
-		sendto(socks[idx], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+		sendto(socks[idx], (const char *)req, req_len, 0,
 			(struct sockaddr *)&dest, sizeof(dest));
 		activeCount++;
+	};
+
+	/* Answer the A2S_SERVERQUERY_GETCHALLENGE reply that ReHLDS and post-2020
+	   Valve builds send instead of the info payload. Keeps the socket and its
+	   window slot; only the timeout clock restarts. */
+	auto sendChallengeQuery = [&](int idx, uint32_t challenge) {
+		struct sockaddr_in dest;
+		memset(&dest, 0, sizeof(dest));
+		dest.sin_family = AF_INET;
+		dest.sin_addr.s_addr = master_result.servers[idx].ip;
+		dest.sin_port = master_result.servers[idx].port;
+
+		uint8_t req[A2S_INFO_REQUEST_MAX];
+		int req_len = a2s_build_info_request(req, sizeof(req), &challenge);
+
+		challenged[idx] = true;
+		sendTimes[idx] = GetTickCount();
+		sendto(socks[idx], (const char *)req, req_len, 0,
+			(struct sockaddr *)&dest, sizeof(dest));
 	};
 
 	while (nextToSend < total && activeCount < WINDOW)
@@ -221,6 +249,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 			{
 				if (socks[i] == INVALID_SOCKET) continue;
 				if (!FD_ISSET(socks[i], &readfds)) continue;
+				sel--;
 
 				uint8_t buf[2048];
 				struct sockaddr_in from;
@@ -230,6 +259,14 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
 				DWORD elapsed = GetTickCount() - sendTimes[i];
 				gameserveritem_t *gs = &data->servers[i];
+
+				uint32_t challenge;
+				if (recv_len > 0 && !challenged[i] &&
+					a2s_is_challenge(buf, recv_len, &challenge))
+				{
+					sendChallengeQuery(i, challenge);
+					continue;
+				}
 
 				a2s_server_info_t info;
 				memset(&info, 0, sizeof(info));
@@ -241,7 +278,8 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 					strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
 					strncpy(gs->m_szGameDir, info.gamedir, sizeof(gs->m_szGameDir) - 1);
 					strncpy(gs->m_szGameDescription, info.gamedesc, sizeof(gs->m_szGameDescription) - 1);
-					gs->m_nAppID = info.appid;
+					/* Legacy GoldSrc replies carry no AppID field. */
+					gs->m_nAppID = info.appid ? info.appid : data->appId;
 					gs->m_nPlayers = info.players;
 					gs->m_nMaxPlayers = info.max_players;
 					gs->m_nBotPlayers = info.bots;
@@ -254,7 +292,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 				socks[i] = INVALID_SOCKET;
 				activeCount--;
 				finished++;
-				sel--;
 
 				if (nextToSend < total)
 				{
@@ -326,6 +363,7 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
 	data->self = this;
 	data->servers = m_servers;
 	data->serverCount = &m_serverCount;
+	data->appId = iApp;
 
 	m_hThread = CreateThread(NULL, 0, QueryThread, data, 0, NULL);
 
