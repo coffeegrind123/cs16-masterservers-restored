@@ -30,6 +30,15 @@ static void skip_string(const uint8_t *data, int len, int *pos)
 	if (*pos < len) (*pos)++;
 }
 
+/* Reads a trailing field a short reply is allowed to omit. Servers that stop
+   early still parse, with the field left at its default, rather than the whole
+   reply being discarded. */
+static uint8_t read_u8_or(const uint8_t *data, int len, int *pos, uint8_t dflt)
+{
+	if (*pos >= len) return dflt;
+	return data[(*pos)++];
+}
+
 bool a2s_is_challenge(const uint8_t *data, int len, uint32_t *out_challenge)
 {
 	if (len < 9) return false;
@@ -78,9 +87,11 @@ static bool parse_a2s_source_info(const uint8_t *data, int len, int pos, a2s_ser
 	out->type = (char)data[pos++];
 	out->os = (char)data[pos++];
 
-	if (pos + 2 > len) return false;
+	if (pos >= len) return false;
 	out->password = data[pos++];
-	out->secure = data[pos++];
+
+	/* VAC and the version string are trailing fields a short reply may omit. */
+	out->secure = read_u8_or(data, len, &pos, 0);
 
 	read_string(data, len, &pos, out->version, sizeof(out->version));
 
@@ -99,33 +110,33 @@ static bool parse_a2s_goldsrc_info(const uint8_t *data, int len, int pos, a2s_se
 	read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
 	read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
 
-	if (pos + 6 > len) return false;
+	if (pos + 2 > len) return false;
 
 	out->players = data[pos++];
 	out->max_players = data[pos++];
-	out->protocol = data[pos++];
-	out->type = (char)data[pos++];
-	out->os = (char)data[pos++];
-	out->password = data[pos++];
 
-	if (pos >= len) return false;
-	uint8_t is_mod = data[pos++];
+	/* Everything past max_players is a trailing field a short reply may omit.
+	   The defaults match what a listing shows for a server that never sent them. */
+	out->protocol = read_u8_or(data, len, &pos, 0);
+	out->type = (char)read_u8_or(data, len, &pos, 'd');
+	out->os = (char)read_u8_or(data, len, &pos, 'l');
+	out->password = read_u8_or(data, len, &pos, 0);
 
+	uint8_t is_mod = read_u8_or(data, len, &pos, 0);
 	if (is_mod == 1)
 	{
 		skip_string(data, len, &pos);	/* mod website */
 		skip_string(data, len, &pos);	/* mod download url */
-		if (pos < len) pos++;			/* NUL filler */
+		pos += 1;						/* NUL filler */
 		pos += 4;						/* mod version */
 		pos += 4;						/* mod size */
-		if (pos + 2 > len) return false;
-		pos++;							/* server-side only */
-		pos++;							/* custom client dll */
+		pos += 1;						/* server-side only */
+		pos += 1;						/* custom client dll */
+		if (pos > len) pos = len;		/* truncated block: fall back to defaults */
 	}
 
-	if (pos + 2 > len) return false;
-	out->secure = data[pos++];
-	out->bots = data[pos++];
+	out->secure = read_u8_or(data, len, &pos, 0);
+	out->bots = read_u8_or(data, len, &pos, 0);
 
 	out->valid = true;
 	return true;
